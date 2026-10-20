@@ -1,4 +1,5 @@
 import streamlit as st
+from streamlit_gsheets import GSheetsConnection
 import pandas as pd
 import json
 import os
@@ -12,60 +13,111 @@ st.set_page_config(
     layout="wide"
 )
 
-DB_FILE = "tournament_db.json"
-
-# Obtener credenciales de Admin desde Streamlit Secrets (o Fallback)
 ADMIN_USER = st.secrets.get("ADMIN_USER", "zeloth")
 ADMIN_PASS = st.secrets.get("ADMIN_PASS", "sccadmin")
 
+# Conexión nativa a Google Sheets
+conn = st.connection("gsheets", type=GSheetsConnection)
+
 # ==========================================
-# BASE DE DATOS Y PERSISTENCIA (JSON)
+# LECTURA / ESCRITURA EN GOOGLE SHEETS
 # ==========================================
 def load_db():
-    if not os.path.exists(DB_FILE):
-        default_db = {
+    try:
+        df_users = conn.read(worksheet="Users", ttl=0)
+        df_tourney = conn.read(worksheet="Tournament", ttl=0)
+        
+        users_dict = {}
+        for _, row in df_users.iterrows():
+            if pd.notna(row['username']):
+                users_dict[str(row['username'])] = {
+                    "password": str(row['password']),
+                    "name": str(row['name']),
+                    "role": str(row['role']),
+                    "deck": str(row['deck']) if pd.notna(row['deck']) else "Sin Mazo Asignado",
+                    "reset_requested": bool(row['reset_requested']) if pd.notna(row['reset_requested']) else False
+                }
+                
+        if ADMIN_USER not in users_dict:
+            users_dict[ADMIN_USER] = {
+                "password": ADMIN_PASS,
+                "name": "[SCC]zeloth",
+                "role": "admin",
+                "deck": "Straw Hat Pirates",
+                "reset_requested": False
+            }
+
+        tourney_dict = {
+            "status": "not_started",
+            "name": "",
+            "round": 0,
+            "players": {},
+            "pairings": {},
+            "past_tournaments": []
+        }
+        
+        if not df_tourney.empty and 'data' in df_tourney['key'].values:
+            val = df_tourney.loc[df_tourney['key'] == 'data', 'value'].values[0]
+            if pd.notna(val) and str(val).strip() != "":
+                tourney_dict = json.loads(val)
+                
+        return {"users": users_dict, "tournament": tourney_dict}
+    except Exception as e:
+        return {
             "users": {
                 ADMIN_USER: {
                     "password": ADMIN_PASS,
-                    "name": "Zeloth (Admin)",
+                    "name": "[SCC]zeloth",
                     "role": "admin",
                     "deck": "Straw Hat Pirates",
                     "reset_requested": False
                 }
             },
             "tournament": {
-                "status": "not_started", # not_started, active, finished
-                "name": "",
-                "round": 0,
-                "players": {},
-                "pairings": {},
-                "past_tournaments": []
+                "status": "not_started", "name": "", "round": 0,
+                "players": {}, "pairings": {}, "past_tournaments": []
             }
         }
-        with open(DB_FILE, "w", encoding="utf-8") as f:
-            json.dump(default_db, f, indent=4)
-        return default_db
-    
-    with open(DB_FILE, "r", encoding="utf-8") as f:
-        data = json.load(f)
-        # Asegurar que la cuenta Admin exista con credenciales actualizadas
-        if ADMIN_USER not in data["users"]:
-            data["users"][ADMIN_USER] = {
-                "password": ADMIN_PASS,
-                "name": "Zeloth (Admin)",
-                "role": "admin",
-                "deck": "Straw Hat Pirates",
-                "reset_requested": False
-            }
-        return data
+
+def load_deck_list():
+    """Carga la lista de mazos/líderes desde la pestaña 'Decks' de Google Sheets"""
+    default_decks = [
+        "Red Luffy (ST01)", "Zoro (OP01)", "Law (OP01)",
+        "Kaido (ST04)", "Katakuri (OP03)", "Nami (OP03)",
+        "Enel (OP05)", "Sabo (ST13)", "Luffy Gear 5 (OP05)"
+    ]
+    try:
+        df_decks = conn.read(worksheet="Decks", ttl=60)
+        if not df_decks.empty and "deck_name" in df_decks.columns:
+            decks = df_decks["deck_name"].dropna().astype(str).str.strip().tolist()
+            return decks if decks else default_decks
+    except Exception:
+        pass
+    return default_decks
 
 def save_db(data):
-    with open(DB_FILE, "w", encoding="utf-8") as f:
-        json.dump(data, f, indent=4)
+    # 1. Guardar usuarios en la pestaña "Users"
+    users_rows = []
+    for u_id, u_data in data["users"].items():
+        users_rows.append({
+            "username": u_id,
+            "password": u_data["password"],
+            "name": u_data["name"],
+            "role": u_data["role"],
+            "deck": u_data.get("deck", ""),
+            "reset_requested": u_data.get("reset_requested", False)
+        })
+    df_users = pd.DataFrame(users_rows)
+    conn.update(worksheet="Users", data=df_users)
+    
+    # 2. Guardar estado del torneo en la pestaña "Tournament"
+    tourney_json = json.dumps(data["tournament"])
+    df_tourney = pd.DataFrame([{"key": "data", "value": tourney_json}])
+    conn.update(worksheet="Tournament", data=df_tourney)
 
 db = load_db()
+available_decks = load_deck_list()
 
-# Manejo de sesión de usuario
 if "logged_user" not in st.session_state:
     st.session_state.logged_user = None
 
@@ -78,10 +130,8 @@ def generate_swiss_pairings(db_data):
         u for u, p in t_data["players"].items() if not p.get("dropped", False)
     ]
     
-    # Ordenar por puntos descendentes
     active_players.sort(key=lambda x: t_data["players"][x]["points"], reverse=True)
     
-    # Bye si el número de jugadores es impar
     bye_player = None
     if len(active_players) % 2 != 0:
         for p in reversed(active_players):
@@ -144,7 +194,6 @@ if st.session_state.logged_user is None:
         username = st.sidebar.text_input("Nombre de Usuario (Login)")
         password = st.sidebar.text_input("Contraseña", type="password")
         user_name = st.sidebar.text_input("Nombre / Nick de Jugador")
-        deck_name = st.sidebar.text_input("Mazo / Leader Principal")
         
         if st.sidebar.button("Crear Cuenta"):
             if username in db["users"]:
@@ -154,7 +203,7 @@ if st.session_state.logged_user is None:
                     "password": password,
                     "name": user_name,
                     "role": "player",
-                    "deck": deck_name,
+                    "deck": available_decks[0] if available_decks else "Sin Mazo Asignado",
                     "reset_requested": False
                 }
                 save_db(db)
@@ -168,7 +217,7 @@ if st.session_state.logged_user is None:
             if reset_user in db["users"]:
                 db["users"][reset_user]["reset_requested"] = True
                 save_db(db)
-                st.sidebar.success("Solicitud enviada al Administrador. Él te asignará una clave temporal.")
+                st.sidebar.success("Solicitud enviada al Administrador.")
             else:
                 st.sidebar.error("El usuario no existe.")
 
@@ -200,26 +249,29 @@ if is_admin:
 tab_elements = st.tabs(tabs)
 
 # ------------------------------------------
-# TAB 1: TORNEO ACTUAL & EMPAREJAMIENTOS
+# TAB 1: TORNEO ACTUAL & ÚLTIMOS 5 TORNEOS
 # ------------------------------------------
 with tab_elements[0]:
     t_info = db["tournament"]
     
+    st.subheader("🎯 Torneo Disponible / Activo")
+    
     if t_info["status"] == "not_started":
-        st.info("No hay ningún torneo activo en este momento.")
+        st.info("No hay ningún torneo en curso en este momento. ¡Inscríbete para el próximo!")
         if st.session_state.logged_user:
             curr_u = st.session_state.logged_user
             in_registered = curr_u in t_info["players"]
+            current_deck = db["users"][curr_u].get("deck", "Sin Mazo Asignado")
             
-            st.subheader("Inscripción al Próximo Torneo")
-            user_deck = st.text_input("Mazo para el torneo:", value=db["users"][curr_u].get("deck", ""))
+            st.write("#### Inscripción al Próximo Torneo")
+            st.write(f"Jugador: **{db['users'][curr_u]['name']}** | Mazo / Líder asignado: **{current_deck}**")
             
             col1, col2 = st.columns(2)
             with col1:
                 if not in_registered:
                     if st.button("Inscribirme al Torneo"):
                         t_info["players"][curr_u] = {
-                            "points": 0, "dropped": False, "deck": user_deck, "history": []
+                            "points": 0, "dropped": False, "deck": current_deck, "history": []
                         }
                         save_db(db)
                         st.success("¡Inscrito correctamente!")
@@ -233,12 +285,12 @@ with tab_elements[0]:
                         st.rerun()
 
     elif t_info["status"] in ["active", "finished"]:
-        st.subheader(f"Torneo: {t_info['name']} (Ronda {t_info['round']})")
+        st.write(f"### ⚔️ {t_info['name']} (Ronda {t_info['round']})")
         
         curr_round_str = str(t_info["round"])
         round_matches = t_info["pairings"].get(curr_round_str, [])
         
-        st.write("### Emparejamientos de la Ronda")
+        st.write("#### Emparejamientos de la Ronda Actual")
         
         for idx, match in enumerate(round_matches):
             p1_name = db["users"].get(match["p1"], {}).get("name", match["p1"])
@@ -251,8 +303,11 @@ with tab_elements[0]:
             
             with st.expander(f"Mesa {idx+1}: {p1_name} vs {p2_name} | Estado: {match['result'] or 'Pendiente'}"):
                 col_a, col_b = st.columns(2)
-                col_a.write(f"**Jugador 1:** {p1_name} ({db['users'][match['p1']].get('deck', 'Mazo N/A')})")
-                col_b.write(f"**Jugador 2:** {p2_name} ({db['users'][match['p2']].get('deck', 'Mazo N/A')})")
+                p1_deck = t_info["players"].get(match["p1"], {}).get("deck", "N/A")
+                p2_deck = t_info["players"].get(match["p2"], {}).get("deck", "N/A")
+                
+                col_a.write(f"**Jugador 1:** {p1_name} ({p1_deck})")
+                col_b.write(f"**Jugador 2:** {p2_name} ({p2_deck})")
 
                 user = st.session_state.logged_user
                 is_participant = user in [match["p1"], match["p2"]]
@@ -299,6 +354,29 @@ with tab_elements[0]:
                         first_name = db["users"].get(match["first"], {}).get("name")
                         st.write(f"**Inició Primero:** {first_name}")
 
+    st.write("---")
+    st.subheader("🏅 Últimos 5 Torneos Realizados")
+    past_tourneys = db["tournament"].get("past_tournaments", [])
+    
+    if past_tourneys:
+        last_5 = list(reversed(past_tourneys))[:5]
+        summary_rows = []
+        for t in last_5:
+            winner_user = t.get("winner_user", t.get("winner"))
+            winner_name = t.get("winner_name", db["users"].get(winner_user, {}).get("name", winner_user))
+            winner_deck = t.get("winner_deck", db["users"].get(winner_user, {}).get("deck", "N/A"))
+            
+            summary_rows.append({
+                "Torneo": t.get("name", "Torneo OPTCG"),
+                "Ganador 👑": winner_name,
+                "Líder / Mazo Utilizado 🎴": winner_deck,
+                "Rondas Totales": t.get("total_rounds", "N/A")
+            })
+            
+        st.dataframe(pd.DataFrame(summary_rows), use_container_width=True)
+    else:
+        st.info("Aún no se han finalizado torneos para mostrar en el historial reciente.")
+
 # ------------------------------------------
 # TAB 2: STANDINGS
 # ------------------------------------------
@@ -326,22 +404,25 @@ with tab_elements[1]:
 # TAB 3: HISTORIAL
 # ------------------------------------------
 with tab_elements[2]:
-    st.subheader("📜 Historial de Torneos")
+    st.subheader("📜 Historial Completo de Torneos")
     past_list = db["tournament"].get("past_tournaments", [])
     if past_list:
         for past in reversed(past_list):
-            with st.expander(f"Torneo: {past['name']} - Ganador: {past.get('winner', 'N/A')}"):
-                st.write(f"Rondas totales: {past['total_rounds']}")
+            w_name = past.get("winner_name", past.get("winner", "N/A"))
+            w_deck = past.get("winner_deck", "N/A")
+            
+            with st.expander(f"🏆 Torneo: {past['name']} — Ganador: {w_name} ({w_deck})"):
+                st.write(f"**Rondas totales:** {past['total_rounds']}")
+                st.write("**Detalle de Standings Finales:**")
                 st.json(past["standings"])
     else:
         st.info("No hay torneos pasados registrados.")
 
 # ------------------------------------------
-# TAB 4: MI PERFIL (USUARIOS LOGUEADOS)
+# TAB 4: MI PERFIL (GESTIÓN DE MAZO E IMÁGENES)
 # ------------------------------------------
 if is_logged:
-    profile_tab_idx = 3
-    with tab_elements[profile_tab_idx]:
+    with tab_elements[3]:
         st.subheader("👤 Administración de Mi Perfil")
         curr_username = st.session_state.logged_user
         user_data = db["users"][curr_username]
@@ -349,16 +430,32 @@ if is_logged:
         col_prof1, col_prof2 = st.columns(2)
         
         with col_prof1:
-            st.write("### ✏️ Actualizar Información Personal")
+            st.write("### ✏️ Información Personal y Mazo")
             new_name = st.text_input("Nombre Visible / Nick:", value=user_data.get("name", ""))
-            new_deck = st.text_input("Mazo / Leader Habitual:", value=user_data.get("deck", ""))
+            
+            # Selección de mazo mediante lista desplegable cargada de Google Sheets
+            current_deck = user_data.get("deck", available_decks[0] if available_decks else "Sin Mazo Asignado")
+            deck_index = available_decks.index(current_deck) if current_deck in available_decks else 0
+            
+            selected_deck = st.selectbox(
+                "Mazo / Líder Habitual:",
+                options=available_decks,
+                index=deck_index
+            )
+            
+            # Búsqueda y despliegue de la imagen del líder si existe en la carpeta 'images/'
+            img_filename = f"{selected_deck.lower().replace(' ', '_')}.png"
+            img_path = os.path.join("images", img_filename)
+            
+            if os.path.exists(img_path):
+                st.image(img_path, caption=f"Líder: {selected_deck}", width=180)
             
             if st.button("Guardar Datos del Perfil"):
                 if new_name.strip():
                     db["users"][curr_username]["name"] = new_name.strip()
-                    db["users"][curr_username]["deck"] = new_deck.strip()
+                    db["users"][curr_username]["deck"] = selected_deck
                     save_db(db)
-                    st.success("Perfil actualizado correctamente.")
+                    st.success("Perfil y Mazo actualizados correctamente.")
                     st.rerun()
                 else:
                     st.error("El nombre visible no puede estar vacío.")
@@ -400,7 +497,7 @@ if is_admin:
                 "Usuario": u_id,
                 "Nombre": u_data.get("name", ""),
                 "Rol": u_data.get("role", "player"),
-                "Mazo": u_data.get("deck", ""),
+                "Mazo": u_data.get("deck", "Sin Mazo"),
                 "Reset Solicitado": "SÍ" if u_data.get("reset_requested") else "No"
             })
         
@@ -517,13 +614,16 @@ if is_admin:
             if st.button("Finalizar Torneo 🏆"):
                 t_data["status"] = "finished"
                 sorted_p = sorted(t_data["players"].items(), key=lambda x: x[1]["points"], reverse=True)
-                winner = sorted_p[0][0] if sorted_p else "N/A"
-                winner_name = db["users"].get(winner, {}).get("name", winner)
+                winner_user = sorted_p[0][0] if sorted_p else "N/A"
+                winner_name = db["users"].get(winner_user, {}).get("name", winner_user)
+                winner_deck = t_data["players"].get(winner_user, {}).get("deck", "N/A")
                 
                 t_data.setdefault("past_tournaments", []).append({
                     "name": t_data["name"],
                     "total_rounds": t_data["round"],
-                    "winner": winner_name,
+                    "winner_user": winner_user,
+                    "winner_name": winner_name,
+                    "winner_deck": winner_deck,
                     "standings": t_data["players"]
                 })
                 
@@ -532,5 +632,5 @@ if is_admin:
                 t_data["players"] = {}
                 t_data["pairings"] = {}
                 save_db(db)
-                st.success(f"Torneo Finalizado. ¡Ganador: {winner_name}!")
+                st.success(f"Torneo Finalizado. ¡Ganador: {winner_name} con {winner_deck}!")
                 st.rerun()
