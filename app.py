@@ -1,8 +1,8 @@
 import streamlit as st
-from streamlit_gsheets import GSheetsConnection
 import pandas as pd
 import json
 import os
+import requests
 
 # Inicializar sesión si no existe
 if "logged_user" not in st.session_state:
@@ -23,11 +23,12 @@ st.set_page_config(
 ADMIN_USER = st.secrets.get("ADMIN_USER", "zeloth")
 ADMIN_PASS = st.secrets.get("ADMIN_PASS", "admin123")
 
-# Conexión nativa a Google Sheets
-conn = st.connection("gsheets", type=GSheetsConnection)
+# URL CSV pública
+CSV_URL = "https://docs.google.com/spreadsheets/d/e/2PACX-1vSlqNJBZPMhsOMkC887C9BwrZTVT_BDOVYv3N7yeYhmJ8SadH-dUBnVeyIHsZbSyZEpiSBoIjZSk8N0/pub?gid=0&single=true&output=csv"
+WEBAPP_URL = st.secrets.get("WEBAPP_URL", "")
 
 # ==========================================
-# LECTURA / ESCRITURA EN GOOGLE SHEETS (HOJA ÚNICA)
+# LECTURA / ESCRITURA EN GOOGLE SHEETS
 # ==========================================
 def load_db():
     default_tourney = {
@@ -49,17 +50,22 @@ def load_db():
         }
     }
     
-    default_decks = ["OP17-Shanks"]
+    default_decks = {
+        "OP17-Shanks": "Líder agresivo de los Piratas del Pelirrojo."
+    }
 
     try:
-        df_all = conn.read(ttl=0)
+        df_all = pd.read_csv(CSV_URL)
         
+        if df_all.empty:
+            return {"users": default_users, "tournament": default_tourney, "decks": default_decks}
+
         # Normalizar nombres de columnas a minúsculas
         df_all.columns = [str(col).strip().lower() for col in df_all.columns]
 
         # 1. Cargar Usuarios (Cols A-F)
         users_dict = {}
-        if not df_all.empty and 'username' in df_all.columns:
+        if 'username' in df_all.columns:
             for _, row in df_all.iterrows():
                 if pd.notna(row['username']) and str(row['username']).strip() != "":
                     u_name = str(row['username']).strip()
@@ -68,7 +74,7 @@ def load_db():
                         "name": str(row['name']) if pd.notna(row['name']) else u_name,
                         "role": str(row['role']) if pd.notna(row['role']) else "player",
                         "deck": str(row['deck']) if pd.notna(row['deck']) else "Sin Mazo Asignado",
-                        "reset_requested": bool(row['reset_requested']) if pd.notna(row['reset_requested']) else False
+                        "reset_requested": bool(str(row['reset_requested'])).lower() == 'true' if pd.notna(row['reset_requested']) else False
                     }
                     
         if ADMIN_USER not in users_dict:
@@ -76,8 +82,7 @@ def load_db():
 
         # 2. Cargar Torneo (Cols K-L: key, value)
         tourney_dict = dict(default_tourney)
-        
-        if not df_all.empty and 'key' in df_all.columns and 'value' in df_all.columns:
+        if 'key' in df_all.columns and 'value' in df_all.columns:
             tourney_row = df_all.loc[df_all['key'].astype(str).str.strip().str.lower() == 'data']
             if not tourney_row.empty:
                 val = tourney_row['value'].values[0]
@@ -89,16 +94,20 @@ def load_db():
                     except Exception:
                         pass
 
-        # 3. Cargar Mazos (Col P: deck_name)
-        decks_list = []
-        if not df_all.empty and 'deck_name' in df_all.columns:
-            decks_series = df_all['deck_name'].dropna().astype(str).str.strip()
-            decks_list = [d for d in decks_series.tolist() if d and d.lower() != 'deck_name']
+        # 3. Cargar Mazos y Descripciones (Col P: deck_name, Col Q: deck_description)
+        decks_dict = {}
+        if 'deck_name' in df_all.columns:
+            for _, row in df_all.iterrows():
+                if pd.notna(row['deck_name']) and str(row['deck_name']).strip() != "":
+                    d_name = str(row['deck_name']).strip()
+                    if d_name.lower() != 'deck_name':
+                        d_desc = str(row['deck_description']).strip() if ('deck_description' in df_all.columns and pd.notna(row['deck_description'])) else "Sin descripción disponible."
+                        decks_dict[d_name] = d_desc
 
-        if not decks_list:
-            decks_list = default_decks
+        if not decks_dict:
+            decks_dict = default_decks
 
-        return {"users": users_dict, "tournament": tourney_dict, "decks": decks_list}
+        return {"users": users_dict, "tournament": tourney_dict, "decks": decks_dict}
 
     except Exception:
         return {
@@ -108,63 +117,62 @@ def load_db():
         }
 
 def save_db(data):
-    users_rows = []
-    max_len = max(len(data["users"]), 1, len(data["decks"]))
-    
-    u_keys = list(data["users"].keys())
-    
-    for i in range(max_len):
-        row = {}
+    if not WEBAPP_URL:
+        st.warning("⚠️ No se ha configurado la URL de guardado (WEBAPP_URL).")
+        return
+
+    try:
+        users_rows = []
+        deck_items = list(data["decks"].items())
+        max_len = max(len(data["users"]), 1, len(deck_items))
+        u_keys = list(data["users"].keys())
         
-        if i < len(u_keys):
-            u_id = u_keys[i]
-            u_data = data["users"][u_id]
-            row["username"] = u_id
-            row["password"] = u_data["password"]
-            row["name"] = u_data["name"]
-            row["role"] = u_data["role"]
-            row["deck"] = u_data.get("deck", "")
-            row["reset_requested"] = u_data.get("reset_requested", False)
-        else:
-            row["username"] = None
-            row["password"] = None
-            row["name"] = None
-            row["role"] = None
-            row["deck"] = None
-            row["reset_requested"] = None
+        for i in range(max_len):
+            row = {}
+            if i < len(u_keys):
+                u_id = u_keys[i]
+                u_data = data["users"][u_id]
+                row["username"] = u_id
+                row["password"] = u_data["password"]
+                row["name"] = u_data["name"]
+                row["role"] = u_data["role"]
+                row["deck"] = u_data.get("deck", "")
+                row["reset_requested"] = u_data.get("reset_requested", False)
+            else:
+                row["username"] = ""
+                row["password"] = ""
+                row["name"] = ""
+                row["role"] = ""
+                row["deck"] = ""
+                row["reset_requested"] = False
 
-        row["_blank1"] = None
-        row["_blank2"] = None
-        row["_blank3"] = None
-        row["_blank4"] = None
+            if i == 0:
+                row["key"] = "data"
+                row["value"] = json.dumps(data["tournament"])
+            else:
+                row["key"] = ""
+                row["value"] = ""
 
-        if i == 0:
-            row["key"] = "data"
-            row["value"] = json.dumps(data["tournament"])
-        else:
-            row["key"] = None
-            row["value"] = None
+            if i < len(deck_items):
+                row["deck_name"] = deck_items[i][0]
+                row["deck_description"] = deck_items[i][1]
+            else:
+                row["deck_name"] = ""
+                row["deck_description"] = ""
 
-        row["_blank5"] = None
-        row["_blank6"] = None
-        row["_blank7"] = None
+            users_rows.append(row)
 
-        if i < len(data["decks"]):
-            row["deck_name"] = data["decks"][i]
-        else:
-            row["deck_name"] = None
-
-        users_rows.append(row)
-
-    df_save = pd.DataFrame(users_rows)
-    df_save = df_save[[c for c in df_save.columns if not c.startswith("_blank")]]
-    
-    conn.update(data=df_save)
+        payload = {"rows": users_rows}
+        response = requests.post(WEBAPP_URL, json=payload, timeout=10)
+        if response.status_code != 200:
+            st.error("⚠️ Ocurrió un problema al enviar los datos a la hoja.")
+    except Exception as e:
+        st.error(f"⚠️ Error de guardado: {e}")
 
 # Cargar base de datos unificada
 db_full = load_db()
 db = {"users": db_full["users"], "tournament": db_full["tournament"]}
-available_decks = db_full["decks"]
+available_decks = db_full["decks"] # Diccionario {"NombreMazo": "Descripcion"}
 
 # ==========================================
 # LÓGICA DEL TORNEO (RONDA SUIZA BO1)
@@ -221,6 +229,8 @@ def generate_swiss_pairings(db_data):
 # ==========================================
 st.sidebar.title("🏴‍☠️ OPTCG Torneos")
 
+deck_names_list = list(available_decks.keys())
+
 if st.session_state.logged_user is None:
     st.sidebar.subheader("Acceso de Usuarios")
     auth_mode = st.sidebar.radio("Menú", ["Iniciar Sesión", "Registrarse", "Olvidé mi Contraseña"])
@@ -253,7 +263,7 @@ if st.session_state.logged_user is None:
                         "password": password,
                         "name": user_name,
                         "role": "player",
-                        "deck": available_decks[0] if available_decks else "Sin Mazo Asignado",
+                        "deck": deck_names_list[0] if deck_names_list else "Sin Mazo Asignado",
                         "reset_requested": False
                     }
                     save_db({"users": db["users"], "tournament": db["tournament"], "decks": available_decks})
@@ -294,17 +304,17 @@ if is_logged:
     is_admin = db["users"].get(st.session_state.logged_user, {}).get("role") == "admin"
 
 # ==========================================
-# DIAGNÓSTICO DE CONEXIÓN A GOOGLE SHEETS (SOLO ADMINS)
+# DIAGNÓSTICO DE CONEXIÓN (SOLO ADMINS)
 # ==========================================
 if is_admin:
-    with st.expander("🔍 Diagnóstico de Conexión a Google Sheets (Solo Admin)"):
+    with st.expander("🔍 Diagnóstico de Lectura de Google Sheets (Solo Admin)"):
         try:
-            df_test = conn.read(ttl=0)
-            st.success("✅ ¡Conexión establecida con éxito a Google Sheets!")
+            df_test = pd.read_csv(CSV_URL)
+            st.success("✅ ¡Lectura de CSV pública desde Google Sheets establecida con éxito!")
             st.write("Columnas detectadas en la hoja:", list(df_test.columns))
             st.dataframe(df_test.head(5))
         except Exception as e:
-            st.error("❌ Error al intentar conectar con Google Sheets:")
+            st.error("❌ Error al leer la hoja CSV:")
             st.exception(e)
 
 tabs = ["⚔️ Torneos", "📊 Standings", "📜 Historial"]
@@ -492,7 +502,7 @@ with tab_elements[2]:
         st.info("No hay torneos pasados registrados.")
 
 # ------------------------------------------
-# TAB 4: MI PERFIL
+# TAB 4: MI PERFIL (IMAGEN Y DESCRIPCIÓN AL LADO)
 # ------------------------------------------
 if is_logged:
     with tab_elements[3]:
@@ -506,23 +516,34 @@ if is_logged:
             st.write("### ✏️ Información Personal y Mazo")
             new_name = st.text_input("Nombre Visible / Nick:", value=user_data.get("name", ""))
             
-            current_deck = user_data.get("deck", available_decks[0] if available_decks else "Sin Mazo Asignado")
-            deck_index = available_decks.index(current_deck) if current_deck in available_decks else 0
+            current_deck = user_data.get("deck", deck_names_list[0] if deck_names_list else "Sin Mazo Asignado")
+            deck_index = deck_names_list.index(current_deck) if current_deck in deck_names_list else 0
             
             selected_deck = st.selectbox(
                 "Mazo / Líder Habitual:",
-                options=available_decks,
+                options=deck_names_list,
                 index=deck_index
             )
+            
+            st.write("---")
+            # MOSTRAR IMAGEN Y DESCRIPCIÓN AL LADO
+            col_img, col_desc = st.columns([1, 2])
             
             img_filename = f"{selected_deck}.png"
             img_path = os.path.join("images", img_filename)
             
-            if os.path.exists(img_path):
-                st.image(img_path, caption=f"Líder: {selected_deck}", width=180)
-            else:
-                st.caption(f"ℹ️ (Sin imagen para '{selected_deck}'. Agrega '{img_filename}' en la carpeta /images del repositorio)")
-            
+            with col_img:
+                if os.path.exists(img_path):
+                    st.image(img_path, caption=f"Líder: {selected_deck}", use_column_width=True)
+                else:
+                    st.caption(f"ℹ️ (Sin imagen para '{selected_deck}')")
+                    
+            with col_desc:
+                st.write(f"**Descripción del Líder:**")
+                deck_desc_text = available_decks.get(selected_deck, "Sin descripción disponible.")
+                st.info(deck_desc_text)
+
+            st.write("---")
             if st.button("Guardar Datos del Perfil"):
                 if new_name.strip():
                     db["users"][curr_username]["name"] = new_name.strip()
