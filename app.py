@@ -31,7 +31,8 @@ conn = st.connection("gsheets", type=GSheetsConnection)
 # ==========================================
 with st.expander("🔍 Diagnóstico de Conexión a Google Sheets"):
     try:
-        df_test = conn.read(worksheet="Users", ttl=0)
+        # Se omite worksheet="Users" para evitar el error 404/400 de URL en st-gsheets-connection
+        df_test = conn.read(ttl=0)
         st.success("✅ ¡Conexión establecida con éxito a Google Sheets!")
         st.write("Columnas detectadas en la hoja:", list(df_test.columns))
         st.dataframe(df_test.head(5))
@@ -40,12 +41,12 @@ with st.expander("🔍 Diagnóstico de Conexión a Google Sheets"):
         st.exception(e)
 
 # ==========================================
-# LECTURA / ESCRITURA EN GOOGLE SHEETS (HOJA ÚNICA: Users)
+# LECTURA / ESCRITURA EN GOOGLE SHEETS (HOJA ÚNICA)
 # ==========================================
 def load_db():
     try:
-        # Leer únicamente la primera pestaña "Users"
-        df_all = conn.read(worksheet="Users", ttl=0)
+        # Leer la primera pestaña de la hoja
+        df_all = conn.read(ttl=0)
         
         # 1. Cargar Usuarios (Cols A-F)
         users_dict = {}
@@ -117,7 +118,6 @@ def load_db():
         }
 
 def save_db(data):
-    # Crear DataFrame unificado manteniendo las columnas en las posiciones correspondientes
     users_rows = []
     max_len = max(len(data["users"]), 1, len(data["decks"]))
     
@@ -126,7 +126,6 @@ def save_db(data):
     for i in range(max_len):
         row = {}
         
-        # Datos de Usuarios (A-F)
         if i < len(u_keys):
             u_id = u_keys[i]
             u_data = data["users"][u_id]
@@ -144,13 +143,11 @@ def save_db(data):
             row["deck"] = None
             row["reset_requested"] = None
 
-        # Relleno intermedio
         row["_blank1"] = None
         row["_blank2"] = None
         row["_blank3"] = None
         row["_blank4"] = None
 
-        # Datos de Torneo (K-L)
         if i == 0:
             row["key"] = "data"
             row["value"] = json.dumps(data["tournament"])
@@ -158,12 +155,10 @@ def save_db(data):
             row["key"] = None
             row["value"] = None
 
-        # Relleno intermedio
         row["_blank5"] = None
         row["_blank6"] = None
         row["_blank7"] = None
 
-        # Datos de Decks (Col P)
         if i < len(data["decks"]):
             row["deck_name"] = data["decks"][i]
         else:
@@ -172,11 +167,9 @@ def save_db(data):
         users_rows.append(row)
 
     df_save = pd.DataFrame(users_rows)
-    # Limpiar columnas de relleno antes de enviar
-    cols_to_keep = ["username", "password", "name", "role", "deck", "reset_requested", "key", "value", "deck_name"]
     df_save = df_save[[c for c in df_save.columns if not c.startswith("_blank")]]
     
-    conn.update(worksheet="Users", data=df_save)
+    conn.update(data=df_save)
 
 # Cargar base de datos unificada
 db_full = load_db()
