@@ -31,7 +31,6 @@ conn = st.connection("gsheets", type=GSheetsConnection)
 # ==========================================
 with st.expander("🔍 Diagnóstico de Conexión a Google Sheets"):
     try:
-        # Se omite worksheet="Users" para evitar el error 404/400 de URL en st-gsheets-connection
         df_test = conn.read(ttl=0)
         st.success("✅ ¡Conexión establecida con éxito a Google Sheets!")
         st.write("Columnas detectadas en la hoja:", list(df_test.columns))
@@ -44,49 +43,64 @@ with st.expander("🔍 Diagnóstico de Conexión a Google Sheets"):
 # LECTURA / ESCRITURA EN GOOGLE SHEETS (HOJA ÚNICA)
 # ==========================================
 def load_db():
+    default_tourney = {
+        "status": "not_started",
+        "name": "",
+        "round": 0,
+        "players": {},
+        "pairings": {},
+        "past_tournaments": []
+    }
+    
+    default_users = {
+        ADMIN_USER: {
+            "password": ADMIN_PASS,
+            "name": "[SCC]zeloth",
+            "role": "admin",
+            "deck": "OP17-Shanks",
+            "reset_requested": False
+        }
+    }
+    
+    default_decks = ["OP17-Shanks"]
+
     try:
-        # Leer la primera pestaña de la hoja
         df_all = conn.read(ttl=0)
         
+        # Normalizar nombres de columnas a minúsculas
+        df_all.columns = [str(col).strip().lower() for col in df_all.columns]
+
         # 1. Cargar Usuarios (Cols A-F)
         users_dict = {}
         if not df_all.empty and 'username' in df_all.columns:
             for _, row in df_all.iterrows():
-                if pd.notna(row['username']):
+                if pd.notna(row['username']) and str(row['username']).strip() != "":
                     u_name = str(row['username']).strip()
                     users_dict[u_name] = {
-                        "password": str(row['password']),
-                        "name": str(row['name']),
-                        "role": str(row['role']),
+                        "password": str(row['password']) if pd.notna(row['password']) else "",
+                        "name": str(row['name']) if pd.notna(row['name']) else u_name,
+                        "role": str(row['role']) if pd.notna(row['role']) else "player",
                         "deck": str(row['deck']) if pd.notna(row['deck']) else "Sin Mazo Asignado",
                         "reset_requested": bool(row['reset_requested']) if pd.notna(row['reset_requested']) else False
                     }
                     
         if ADMIN_USER not in users_dict:
-            users_dict[ADMIN_USER] = {
-                "password": ADMIN_PASS,
-                "name": "[SCC]zeloth",
-                "role": "admin",
-                "deck": "OP17-Shanks",
-                "reset_requested": False
-            }
+            users_dict[ADMIN_USER] = default_users[ADMIN_USER]
 
         # 2. Cargar Torneo (Cols K-L: key, value)
-        tourney_dict = {
-            "status": "not_started",
-            "name": "",
-            "round": 0,
-            "players": {},
-            "pairings": {},
-            "past_tournaments": []
-        }
+        tourney_dict = dict(default_tourney)
         
         if not df_all.empty and 'key' in df_all.columns and 'value' in df_all.columns:
-            tourney_row = df_all.loc[df_all['key'] == 'data']
+            tourney_row = df_all.loc[df_all['key'].astype(str).str.strip().str.lower() == 'data']
             if not tourney_row.empty:
                 val = tourney_row['value'].values[0]
                 if pd.notna(val) and str(val).strip() != "":
-                    tourney_dict = json.loads(val)
+                    try:
+                        parsed_val = json.loads(val)
+                        if isinstance(parsed_val, dict):
+                            tourney_dict.update(parsed_val)
+                    except Exception:
+                        pass
 
         # 3. Cargar Mazos (Col P: deck_name)
         decks_list = []
@@ -95,26 +109,15 @@ def load_db():
             decks_list = [d for d in decks_series.tolist() if d and d.lower() != 'deck_name']
 
         if not decks_list:
-            decks_list = ["OP17-Shanks"]
+            decks_list = default_decks
 
         return {"users": users_dict, "tournament": tourney_dict, "decks": decks_list}
 
-    except Exception as e:
+    except Exception:
         return {
-            "users": {
-                ADMIN_USER: {
-                    "password": ADMIN_PASS,
-                    "name": "[SCC]zeloth",
-                    "role": "admin",
-                    "deck": "OP17-Shanks",
-                    "reset_requested": False
-                }
-            },
-            "tournament": {
-                "status": "not_started", "name": "", "round": 0,
-                "players": {}, "pairings": {}, "past_tournaments": []
-            },
-            "decks": ["OP17-Shanks"]
+            "users": default_users,
+            "tournament": default_tourney,
+            "decks": default_decks
         }
 
 def save_db(data):
@@ -319,7 +322,7 @@ with tab_elements[0]:
     
     st.subheader("🎯 Torneo Activo / Próximo Evento")
     
-    if t_info["status"] == "not_started":
+    if t_info.get("status") == "not_started":
         if t_info.get("name"):
             st.success(f"🏆 **Próximo Torneo:** {t_info['name']}")
             
@@ -353,7 +356,7 @@ with tab_elements[0]:
         else:
             st.info("No hay ningún torneo abierto para inscripciones en este momento. El administrador creará uno próximamente.")
 
-    elif t_info["status"] in ["active", "finished"]:
+    elif t_info.get("status") in ["active", "finished"]:
         st.write(f"### ⚔️ {t_info['name']} (Ronda {t_info['round']})")
         
         curr_round_str = str(t_info["round"])
@@ -620,7 +623,7 @@ if is_admin:
         st.subheader("⚙️ Controles de Administrador del Torneo")
         t_data = db["tournament"]
 
-        if t_data["status"] == "not_started":
+        if t_data.get("status") == "not_started":
             st.write("### Crear o Configurar Nuevo Torneo")
             t_name = st.text_input("Nombre del Torneo", value=t_data.get("name") or "Torneo Semanal OPTCG")
             
@@ -643,7 +646,7 @@ if is_admin:
                         st.success("Torneo iniciado y Primera Ronda generada.")
                         st.rerun()
 
-        elif t_data["status"] == "active":
+        elif t_data.get("status") == "active":
             st.write("### Avance de Rondas")
             curr_r = str(t_data["round"])
             matches = t_data["pairings"].get(curr_r, [])
