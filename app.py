@@ -27,19 +27,6 @@ ADMIN_PASS = st.secrets.get("ADMIN_PASS", "admin123")
 conn = st.connection("gsheets", type=GSheetsConnection)
 
 # ==========================================
-# DIAGNÓSTICO DE CONEXIÓN A GOOGLE SHEETS
-# ==========================================
-with st.expander("🔍 Diagnóstico de Conexión a Google Sheets"):
-    try:
-        df_test = conn.read(ttl=0)
-        st.success("✅ ¡Conexión establecida con éxito a Google Sheets!")
-        st.write("Columnas detectadas en la hoja:", list(df_test.columns))
-        st.dataframe(df_test.head(5))
-    except Exception as e:
-        st.error("❌ Error al intentar conectar con Google Sheets:")
-        st.exception(e)
-
-# ==========================================
 # LECTURA / ESCRITURA EN GOOGLE SHEETS (HOJA ÚNICA)
 # ==========================================
 def load_db():
@@ -305,6 +292,20 @@ is_logged = st.session_state.logged_user is not None
 is_admin = False
 if is_logged:
     is_admin = db["users"].get(st.session_state.logged_user, {}).get("role") == "admin"
+
+# ==========================================
+# DIAGNÓSTICO DE CONEXIÓN A GOOGLE SHEETS (SOLO ADMINS)
+# ==========================================
+if is_admin:
+    with st.expander("🔍 Diagnóstico de Conexión a Google Sheets (Solo Admin)"):
+        try:
+            df_test = conn.read(ttl=0)
+            st.success("✅ ¡Conexión establecida con éxito a Google Sheets!")
+            st.write("Columnas detectadas en la hoja:", list(df_test.columns))
+            st.dataframe(df_test.head(5))
+        except Exception as e:
+            st.error("❌ Error al intentar conectar con Google Sheets:")
+            st.exception(e)
 
 tabs = ["⚔️ Torneos", "📊 Standings", "📜 Historial"]
 if is_logged:
