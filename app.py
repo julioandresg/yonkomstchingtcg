@@ -50,8 +50,12 @@ def load_db():
         }
     }
     
+    # Mazos por defecto en caso de que la columna P no exista en la vista CSV
     default_decks = {
-        "OP17-Shanks": "Líder agresivo de los Piratas del Pelirrojo."
+        "OP17-Shanks": "Líder Rojo/Negro. Centrado en control de campo y agresión masiva reduciendo costo.",
+        "OP01-001 Zoro": "Líder Rojo agresivo. Otorga +1000 a todos los personajes atacantes con 1 DON!! adosado.",
+        "OP02-001 Whitebeard": "Líder Rojo de 6000 de poder. Roba una carta de vida al final de cada turno.",
+        "OP03-099 Katakuri": "Líder Amarillo de 7000 de poder. Permite mirar y reordenar cartas de vida."
     }
 
     try:
@@ -60,7 +64,7 @@ def load_db():
         if df_all.empty:
             return {"users": default_users, "tournament": default_tourney, "decks": default_decks}
 
-        # Normalizar nombres de columnas a minúsculas
+        # Normalizar nombres de columnas a minúsculas y quitar espacios extra
         df_all.columns = [str(col).strip().lower() for col in df_all.columns]
 
         # 1. Cargar Usuarios (Cols A-F)
@@ -73,7 +77,7 @@ def load_db():
                         "password": str(row['password']) if pd.notna(row['password']) else "",
                         "name": str(row['name']) if pd.notna(row['name']) else u_name,
                         "role": str(row['role']) if pd.notna(row['role']) else "player",
-                        "deck": str(row['deck']) if pd.notna(row['deck']) else "Sin Mazo Asignado",
+                        "deck": str(row['deck']) if pd.notna(row['deck']) else "OP17-Shanks",
                         "reset_requested": bool(str(row['reset_requested'])).lower() == 'true' if pd.notna(row['reset_requested']) else False
                     }
                     
@@ -104,6 +108,7 @@ def load_db():
                         d_desc = str(row['deck_description']).strip() if ('deck_description' in df_all.columns and pd.notna(row['deck_description'])) else "Sin descripción disponible."
                         decks_dict[d_name] = d_desc
 
+        # Si no se encontraron mazos en la columna P, usamos el fallback predeterminado
         if not decks_dict:
             decks_dict = default_decks
 
@@ -172,7 +177,10 @@ def save_db(data):
 # Cargar base de datos unificada
 db_full = load_db()
 db = {"users": db_full["users"], "tournament": db_full["tournament"]}
-available_decks = db_full["decks"] # Diccionario {"NombreMazo": "Descripcion"}
+available_decks = db_full["decks"]
+
+# Garantizar que siempre exista al menos un mazo en la lista
+deck_names_list = list(available_decks.keys()) if available_decks else ["OP17-Shanks"]
 
 # ==========================================
 # LÓGICA DEL TORNEO (RONDA SUIZA BO1)
@@ -229,8 +237,6 @@ def generate_swiss_pairings(db_data):
 # ==========================================
 st.sidebar.title("🏴‍☠️ OPTCG Torneos")
 
-deck_names_list = list(available_decks.keys())
-
 if st.session_state.logged_user is None:
     st.sidebar.subheader("Acceso de Usuarios")
     auth_mode = st.sidebar.radio("Menú", ["Iniciar Sesión", "Registrarse", "Olvidé mi Contraseña"])
@@ -263,7 +269,7 @@ if st.session_state.logged_user is None:
                         "password": password,
                         "name": user_name,
                         "role": "player",
-                        "deck": deck_names_list[0] if deck_names_list else "Sin Mazo Asignado",
+                        "deck": deck_names_list[0],
                         "reset_requested": False
                     }
                     save_db({"users": db["users"], "tournament": db["tournament"], "decks": available_decks})
@@ -502,7 +508,7 @@ with tab_elements[2]:
         st.info("No hay torneos pasados registrados.")
 
 # ------------------------------------------
-# TAB 4: MI PERFIL (IMAGEN Y DESCRIPCIÓN AL LADO)
+# TAB 4: MI PERFIL (IMAGEN Y DESCRIPCIÓN)
 # ------------------------------------------
 if is_logged:
     with tab_elements[3]:
@@ -516,7 +522,7 @@ if is_logged:
             st.write("### ✏️ Información Personal y Mazo")
             new_name = st.text_input("Nombre Visible / Nick:", value=user_data.get("name", ""))
             
-            current_deck = user_data.get("deck", deck_names_list[0] if deck_names_list else "Sin Mazo Asignado")
+            current_deck = user_data.get("deck", deck_names_list[0])
             deck_index = deck_names_list.index(current_deck) if current_deck in deck_names_list else 0
             
             selected_deck = st.selectbox(
@@ -526,7 +532,7 @@ if is_logged:
             )
             
             st.write("---")
-            # MOSTRAR IMAGEN Y DESCRIPCIÓN AL LADO
+            # VISTA DE IMAGEN Y DESCRIPCIÓN AL LADO
             col_img, col_desc = st.columns([1, 2])
             
             img_filename = f"{selected_deck}.png"
