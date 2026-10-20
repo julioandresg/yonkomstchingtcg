@@ -2,7 +2,6 @@ import streamlit as st
 import pandas as pd
 import json
 import os
-import random
 
 # ==========================================
 # CONFIGURACIÓN DE LA PÁGINA
@@ -15,6 +14,10 @@ st.set_page_config(
 
 DB_FILE = "tournament_db.json"
 
+# Obtener credenciales de Admin desde Streamlit Secrets (o Fallback)
+ADMIN_USER = st.secrets.get("ADMIN_USER", "zeloth")
+ADMIN_PASS = st.secrets.get("ADMIN_PASS", "sccadmin")
+
 # ==========================================
 # BASE DE DATOS Y PERSISTENCIA (JSON)
 # ==========================================
@@ -22,19 +25,20 @@ def load_db():
     if not os.path.exists(DB_FILE):
         default_db = {
             "users": {
-                "zeloth": {
-                    "password": "sccadmin",
-                    "name": "[SCC]zeloth",
+                ADMIN_USER: {
+                    "password": ADMIN_PASS,
+                    "name": "Zeloth (Admin)",
                     "role": "admin",
-                    "deck": ""
+                    "deck": "Straw Hat Pirates",
+                    "reset_requested": False
                 }
             },
             "tournament": {
                 "status": "not_started", # not_started, active, finished
                 "name": "",
                 "round": 0,
-                "players": {}, # {username: {"points": 0, "dropped": False, "deck": "", "history": []}}
-                "pairings": {}, # {round_num: [{"p1": str, "p2": str/None, "result": None, "first": None}]}
+                "players": {},
+                "pairings": {},
                 "past_tournaments": []
             }
         }
@@ -43,7 +47,17 @@ def load_db():
         return default_db
     
     with open(DB_FILE, "r", encoding="utf-8") as f:
-        return json.load(f)
+        data = json.load(f)
+        # Asegurar que la cuenta Admin exista con credenciales actualizadas
+        if ADMIN_USER not in data["users"]:
+            data["users"][ADMIN_USER] = {
+                "password": ADMIN_PASS,
+                "name": "Zeloth (Admin)",
+                "role": "admin",
+                "deck": "Straw Hat Pirates",
+                "reset_requested": False
+            }
+        return data
 
 def save_db(data):
     with open(DB_FILE, "w", encoding="utf-8") as f:
@@ -64,10 +78,10 @@ def generate_swiss_pairings(db_data):
         u for u, p in t_data["players"].items() if not p.get("dropped", False)
     ]
     
-    # Ordenar jugadores por puntos descendentes
+    # Ordenar por puntos descendentes
     active_players.sort(key=lambda x: t_data["players"][x]["points"], reverse=True)
     
-    # Si hay impar, dar Bye al jugador de menor puntaje que no haya tenido Bye
+    # Bye si el número de jugadores es impar
     bye_player = None
     if len(active_players) % 2 != 0:
         for p in reversed(active_players):
@@ -78,7 +92,6 @@ def generate_swiss_pairings(db_data):
             bye_player = active_players[-1]
         active_players.remove(bye_player)
     
-    # Historial de oponentes jugados
     def played_before(p1, p2):
         return p2 in t_data["players"][p1].get("history", [])
 
@@ -100,7 +113,6 @@ def generate_swiss_pairings(db_data):
 
     if bye_player:
         pairings.append({"p1": bye_player, "p2": None, "result": "BYE", "first": None})
-        # Otorgar 3 puntos automáticos por Bye
         t_data["players"][bye_player]["points"] += 3
         t_data["players"][bye_player].setdefault("history", []).append("BYE")
 
@@ -115,14 +127,23 @@ def generate_swiss_pairings(db_data):
 st.sidebar.title("🏴‍☠️ OPTCG Torneos")
 
 if st.session_state.logged_user is None:
-    st.sidebar.subheader("Iniciar Sesión / Registro")
-    auth_mode = st.sidebar.radio("Modo", ["Iniciar Sesión", "Registrarse"])
+    st.sidebar.subheader("Acceso de Usuarios")
+    auth_mode = st.sidebar.radio("Menú", ["Iniciar Sesión", "Registrarse", "Olvidé mi Contraseña"])
     
-    username = st.sidebar.text_input("Usuario")
-    password = st.sidebar.text_input("Contraseña", type="password")
-    
-    if auth_mode == "Registrarse":
-        user_name = st.sidebar.text_input("Nombre de Jugador")
+    if auth_mode == "Iniciar Sesión":
+        username = st.sidebar.text_input("Usuario")
+        password = st.sidebar.text_input("Contraseña", type="password")
+        if st.sidebar.button("Ingresar"):
+            if username in db["users"] and db["users"][username]["password"] == password:
+                st.session_state.logged_user = username
+                st.rerun()
+            else:
+                st.sidebar.error("Usuario o contraseña incorrectos.")
+                
+    elif auth_mode == "Registrarse":
+        username = st.sidebar.text_input("Nombre de Usuario (Login)")
+        password = st.sidebar.text_input("Contraseña", type="password")
+        user_name = st.sidebar.text_input("Nombre / Nick de Jugador")
         deck_name = st.sidebar.text_input("Mazo / Leader Principal")
         
         if st.sidebar.button("Crear Cuenta"):
@@ -133,20 +154,24 @@ if st.session_state.logged_user is None:
                     "password": password,
                     "name": user_name,
                     "role": "player",
-                    "deck": deck_name
+                    "deck": deck_name,
+                    "reset_requested": False
                 }
                 save_db(db)
-                st.sidebar.success("¡Cuenta creada con éxito! Ahora inicia sesión.")
+                st.sidebar.success("¡Cuenta creada! Ya puedes iniciar sesión.")
             else:
-                st.sidebar.warning("Por favor completa todos los campos.")
+                st.sidebar.warning("Completa todos los campos obligatorios.")
 
-    else:
-        if st.sidebar.button("Ingresar"):
-            if username in db["users"] and db["users"][username]["password"] == password:
-                st.session_state.logged_user = username
-                st.rerun()
+    elif auth_mode == "Olvidé mi Contraseña":
+        reset_user = st.sidebar.text_input("Ingresa tu usuario:")
+        if st.sidebar.button("Solicitar Restablecimiento"):
+            if reset_user in db["users"]:
+                db["users"][reset_user]["reset_requested"] = True
+                save_db(db)
+                st.sidebar.success("Solicitud enviada al Administrador. Él te asignará una clave temporal.")
             else:
-                st.sidebar.error("Usuario o contraseña incorrectos.")
+                st.sidebar.error("El usuario no existe.")
+
 else:
     cur_user = db["users"][st.session_state.logged_user]
     st.sidebar.write(f"👋 Hola, **{cur_user['name']}**")
@@ -157,16 +182,27 @@ else:
         st.rerun()
 
 # ==========================================
-# NAVEGACIÓN Y PESTAÑAS PRINCIPALES
+# NAVEGACIÓN PRINCIPAL
 # ==========================================
 st.title("🏆 Gestión de Torneos One Piece Card Game")
 
-tab1, tab2, tab3, tab4 = st.tabs(["⚔️ Torneo Actual", "📊 Standings", "📜 Historial", "⚙️ Administración"])
+is_logged = st.session_state.logged_user is not None
+is_admin = False
+if is_logged:
+    is_admin = db["users"].get(st.session_state.logged_user, {}).get("role") == "admin"
+
+tabs = ["⚔️ Torneo Actual", "📊 Standings", "📜 Historial"]
+if is_logged:
+    tabs.append("👤 Mi Perfil")
+if is_admin:
+    tabs.extend(["👥 Gestión de Cuentas", "⚙️ Admin Torneo"])
+
+tab_elements = st.tabs(tabs)
 
 # ------------------------------------------
 # TAB 1: TORNEO ACTUAL & EMPAREJAMIENTOS
 # ------------------------------------------
-with tab1:
+with tab_elements[0]:
     t_info = db["tournament"]
     
     if t_info["status"] == "not_started":
@@ -218,10 +254,8 @@ with tab1:
                 col_a.write(f"**Jugador 1:** {p1_name} ({db['users'][match['p1']].get('deck', 'Mazo N/A')})")
                 col_b.write(f"**Jugador 2:** {p2_name} ({db['users'][match['p2']].get('deck', 'Mazo N/A')})")
 
-                # Comprobar si el usuario actual es participante o admin
                 user = st.session_state.logged_user
                 is_participant = user in [match["p1"], match["p2"]]
-                is_admin = db["users"].get(user, {}).get("role") == "admin"
                 
                 if match["result"] is None:
                     if is_participant or is_admin:
@@ -241,7 +275,6 @@ with tab1:
                         )
                         
                         if st.button("Guardar Resultado", key=f"btn_{t_info['round']}_{idx}"):
-                            # Asignar resultados
                             if winner == p1_name:
                                 match["result"] = match["p1"]
                                 t_info["players"][match["p1"]]["points"] += 3
@@ -253,7 +286,6 @@ with tab1:
                                 t_info["players"][match["p1"]]["points"] += 1
                                 t_info["players"][match["p2"]]["points"] += 1
 
-                            # Historial de oponentes
                             t_info["players"][match["p1"]].setdefault("history", []).append(match["p2"])
                             t_info["players"][match["p2"]].setdefault("history", []).append(match["p1"])
 
@@ -268,9 +300,9 @@ with tab1:
                         st.write(f"**Inició Primero:** {first_name}")
 
 # ------------------------------------------
-# TAB 2: STANDINGS (TABLA DE POSICIONES)
+# TAB 2: STANDINGS
 # ------------------------------------------
-with tab2:
+with tab_elements[1]:
     st.subheader("📊 Tabla de Posiciones")
     if db["tournament"]["players"]:
         standings_data = []
@@ -293,7 +325,7 @@ with tab2:
 # ------------------------------------------
 # TAB 3: HISTORIAL
 # ------------------------------------------
-with tab3:
+with tab_elements[2]:
     st.subheader("📜 Historial de Torneos")
     past_list = db["tournament"].get("past_tournaments", [])
     if past_list:
@@ -305,15 +337,123 @@ with tab3:
         st.info("No hay torneos pasados registrados.")
 
 # ------------------------------------------
-# TAB 4: PANEL DE ADMINISTRACIÓN (SOLO ADMINS)
+# TAB 4: MI PERFIL (USUARIOS LOGUEADOS)
 # ------------------------------------------
-with tab4:
-    logged = st.session_state.logged_user
-    if logged and db["users"].get(logged, {}).get("role") == "admin":
-        st.subheader("⚙️ Controles de Administrador")
+if is_logged:
+    profile_tab_idx = 3
+    with tab_elements[profile_tab_idx]:
+        st.subheader("👤 Administración de Mi Perfil")
+        curr_username = st.session_state.logged_user
+        user_data = db["users"][curr_username]
+        
+        col_prof1, col_prof2 = st.columns(2)
+        
+        with col_prof1:
+            st.write("### ✏️ Actualizar Información Personal")
+            new_name = st.text_input("Nombre Visible / Nick:", value=user_data.get("name", ""))
+            new_deck = st.text_input("Mazo / Leader Habitual:", value=user_data.get("deck", ""))
+            
+            if st.button("Guardar Datos del Perfil"):
+                if new_name.strip():
+                    db["users"][curr_username]["name"] = new_name.strip()
+                    db["users"][curr_username]["deck"] = new_deck.strip()
+                    save_db(db)
+                    st.success("Perfil actualizado correctamente.")
+                    st.rerun()
+                else:
+                    st.error("El nombre visible no puede estar vacío.")
+
+        with col_prof2:
+            st.write("### 🔒 Cambiar Contraseña")
+            curr_pass_input = st.text_input("Contraseña Actual:", type="password")
+            new_pass_input = st.text_input("Nueva Contraseña:", type="password")
+            confirm_pass_input = st.text_input("Reingresar Nueva Contraseña:", type="password")
+            
+            if st.button("Actualizar Contraseña"):
+                if curr_pass_input != user_data["password"]:
+                    st.error("La contraseña actual es incorrecta.")
+                elif not new_pass_input:
+                    st.error("La nueva contraseña no puede estar vacía.")
+                elif new_pass_input != confirm_pass_input:
+                    st.error("Las nuevas contraseñas no coinciden.")
+                else:
+                    db["users"][curr_username]["password"] = new_pass_input
+                    db["users"][curr_username]["reset_requested"] = False
+                    save_db(db)
+                    st.success("¡Tu contraseña ha sido cambiada con éxito!")
+                    st.rerun()
+
+# ------------------------------------------
+# TAB 5: GESTIÓN DE CUENTAS (SOLO ADMINS)
+# ------------------------------------------
+if is_admin:
+    with tab_elements[4]:
+        st.subheader("👥 Gestión de Cuentas de Usuarios")
+        
+        pending_resets = [u for u, d in db["users"].items() if d.get("reset_requested")]
+        if pending_resets:
+            st.warning(f"⚠️ Hay {len(pending_resets)} solicitud(es) de restablecimiento de contraseña pendiente(s): {', '.join(pending_resets)}")
+        
+        users_list = []
+        for u_id, u_data in db["users"].items():
+            users_list.append({
+                "Usuario": u_id,
+                "Nombre": u_data.get("name", ""),
+                "Rol": u_data.get("role", "player"),
+                "Mazo": u_data.get("deck", ""),
+                "Reset Solicitado": "SÍ" if u_data.get("reset_requested") else "No"
+            })
+        
+        st.dataframe(pd.DataFrame(users_list), use_container_width=True)
+        
+        st.write("---")
+        st.write("### Acciones de Administrador sobre Usuarios")
+        
+        target_u = st.selectbox("Seleccionar Usuario a gestionar:", list(db["users"].keys()))
+        
+        col_act1, col_act2 = st.columns(2)
+        
+        with col_act1:
+            st.write("🔑 **Cambiar / Restablecer Contraseña**")
+            admin_new_pass = st.text_input(f"Nueva Contraseña para {target_u}:", type="password", key=f"admin_pass_{target_u}")
+            if st.button("Actualizar Contraseña (Admin)"):
+                if admin_new_pass:
+                    db["users"][target_u]["password"] = admin_new_pass
+                    db["users"][target_u]["reset_requested"] = False
+                    save_db(db)
+                    st.success(f"Contraseña de {target_u} actualizada correctamente.")
+                    st.rerun()
+                else:
+                    st.error("Escribe una contraseña válida.")
+
+        with col_act2:
+            st.write("🛡️ **Cambiar Rol de Usuario**")
+            curr_role = db["users"][target_u].get("role", "player")
+            new_role = st.selectbox("Rol:", ["player", "admin"], index=0 if curr_role == "player" else 1)
+            if st.button("Guardar Rol"):
+                db["users"][target_u]["role"] = new_role
+                save_db(db)
+                st.success(f"Rol de {target_u} cambiado a {new_role}.")
+                st.rerun()
+                
+            st.write("❌ **Eliminar Cuenta**")
+            if st.button(f"Borrar a {target_u}", type="primary"):
+                if target_u == st.session_state.logged_user:
+                    st.error("No puedes borrar tu propia cuenta mientras estás conectado.")
+                else:
+                    del db["users"][target_u]
+                    save_db(db)
+                    st.warning(f"Cuenta {target_u} eliminada.")
+                    st.rerun()
+
+# ------------------------------------------
+# TAB 6: ADMIN TORNEO (SOLO ADMINS)
+# ------------------------------------------
+if is_admin:
+    with tab_elements[5]:
+        st.subheader("⚙️ Controles de Administrador del Torneo")
         t_data = db["tournament"]
 
-        # Crear nuevo torneo
         if t_data["status"] == "not_started":
             st.write("### Crear Nuevo Torneo")
             t_name = st.text_input("Nombre del Torneo", "Torneo Semanal OPTCG")
@@ -327,7 +467,6 @@ with tab4:
                     st.success("Torneo iniciado y Primera Ronda generada.")
                     st.rerun()
 
-        # Controles durante torneo activo
         elif t_data["status"] == "active":
             st.write("### Avance de Rondas")
             curr_r = str(t_data["round"])
@@ -377,12 +516,10 @@ with tab4:
             st.write("---")
             if st.button("Finalizar Torneo 🏆"):
                 t_data["status"] = "finished"
-                # Determinar ganador por puntos
                 sorted_p = sorted(t_data["players"].items(), key=lambda x: x[1]["points"], reverse=True)
                 winner = sorted_p[0][0] if sorted_p else "N/A"
                 winner_name = db["users"].get(winner, {}).get("name", winner)
                 
-                # Archivar torneo
                 t_data.setdefault("past_tournaments", []).append({
                     "name": t_data["name"],
                     "total_rounds": t_data["round"],
@@ -390,7 +527,6 @@ with tab4:
                     "standings": t_data["players"]
                 })
                 
-                # Resetear estado actual
                 t_data["status"] = "not_started"
                 t_data["round"] = 0
                 t_data["players"] = {}
@@ -398,5 +534,3 @@ with tab4:
                 save_db(db)
                 st.success(f"Torneo Finalizado. ¡Ganador: {winner_name}!")
                 st.rerun()
-    else:
-        st.warning("Acceso restringido solo para administradores.")
