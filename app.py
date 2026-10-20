@@ -4,13 +4,20 @@ import pandas as pd
 import json
 import os
 
+# Inicializar sesión si no existe
+if "logged_user" not in st.session_state:
+    st.session_state.logged_user = None
+
 # ==========================================
-# CONFIGURACIÓN DE LA PÁGINA
+# CONFIGURACIÓN DINÁMICA DE LA PÁGINA
 # ==========================================
+sidebar_state = "collapsed" if st.session_state.logged_user else "expanded"
+
 st.set_page_config(
     page_title="OPTCG Swiss Tournament Manager",
     page_icon="🏴‍☠️",
-    layout="wide"
+    layout="wide",
+    initial_sidebar_state=sidebar_state
 )
 
 ADMIN_USER = st.secrets.get("ADMIN_USER", "zeloth")
@@ -62,7 +69,7 @@ def load_db():
                 tourney_dict = json.loads(val)
                 
         return {"users": users_dict, "tournament": tourney_dict}
-    except Exception as e:
+    except Exception:
         return {
             "users": {
                 ADMIN_USER: {
@@ -82,9 +89,9 @@ def load_db():
 def load_deck_list():
     """Carga la lista de mazos/líderes desde la pestaña 'Decks' de Google Sheets"""
     default_decks = [
-        "Red Luffy (ST01)", "Zoro (OP01)", "Law (OP01)",
-        "Kaido (ST04)", "Katakuri (OP03)", "Nami (OP03)",
-        "Enel (OP05)", "Sabo (ST13)", "Luffy Gear 5 (OP05)"
+        "OP17-Shanks", "OP01-001 Zoro", "ST10-001 Law",
+        "ST04-001 Kaido", "OP03-099 Katakuri", "OP03-040 Nami",
+        "OP05-098 Enel", "ST13-001 Sabo", "OP05-119 Luffy"
     ]
     try:
         df_decks = conn.read(worksheet="Decks", ttl=60)
@@ -96,7 +103,6 @@ def load_deck_list():
     return default_decks
 
 def save_db(data):
-    # 1. Guardar usuarios en la pestaña "Users"
     users_rows = []
     for u_id, u_data in data["users"].items():
         users_rows.append({
@@ -110,16 +116,12 @@ def save_db(data):
     df_users = pd.DataFrame(users_rows)
     conn.update(worksheet="Users", data=df_users)
     
-    # 2. Guardar estado del torneo en la pestaña "Tournament"
     tourney_json = json.dumps(data["tournament"])
     df_tourney = pd.DataFrame([{"key": "data", "value": tourney_json}])
     conn.update(worksheet="Tournament", data=df_tourney)
 
 db = load_db()
 available_decks = load_deck_list()
-
-if "logged_user" not in st.session_state:
-    st.session_state.logged_user = None
 
 # ==========================================
 # LÓGICA DEL TORNEO (RONDA SUIZA BO1)
@@ -181,45 +183,53 @@ if st.session_state.logged_user is None:
     auth_mode = st.sidebar.radio("Menú", ["Iniciar Sesión", "Registrarse", "Olvidé mi Contraseña"])
     
     if auth_mode == "Iniciar Sesión":
-        username = st.sidebar.text_input("Usuario")
-        password = st.sidebar.text_input("Contraseña", type="password")
-        if st.sidebar.button("Ingresar"):
-            if username in db["users"] and db["users"][username]["password"] == password:
-                st.session_state.logged_user = username
-                st.rerun()
-            else:
-                st.sidebar.error("Usuario o contraseña incorrectos.")
+        with st.sidebar.form("login_form"):
+            username = st.text_input("Usuario")
+            password = st.text_input("Contraseña", type="password")
+            submit_login = st.form_submit_button("Ingresar")
+            
+            if submit_login:
+                if username in db["users"] and db["users"][username]["password"] == password:
+                    st.session_state.logged_user = username
+                    st.rerun()
+                else:
+                    st.error("Usuario o contraseña incorrectos.")
                 
     elif auth_mode == "Registrarse":
-        username = st.sidebar.text_input("Nombre de Usuario (Login)")
-        password = st.sidebar.text_input("Contraseña", type="password")
-        user_name = st.sidebar.text_input("Nombre / Nick de Jugador")
-        
-        if st.sidebar.button("Crear Cuenta"):
-            if username in db["users"]:
-                st.sidebar.error("El nombre de usuario ya existe.")
-            elif username and password and user_name:
-                db["users"][username] = {
-                    "password": password,
-                    "name": user_name,
-                    "role": "player",
-                    "deck": available_decks[0] if available_decks else "Sin Mazo Asignado",
-                    "reset_requested": False
-                }
-                save_db(db)
-                st.sidebar.success("¡Cuenta creada! Ya puedes iniciar sesión.")
-            else:
-                st.sidebar.warning("Completa todos los campos obligatorios.")
+        with st.sidebar.form("register_form"):
+            username = st.text_input("Nombre de Usuario (Login)")
+            password = st.text_input("Contraseña", type="password")
+            user_name = st.text_input("Nombre / Nick de Jugador")
+            submit_reg = st.form_submit_button("Crear Cuenta")
+            
+            if submit_reg:
+                if username in db["users"]:
+                    st.error("El nombre de usuario ya existe.")
+                elif username and password and user_name:
+                    db["users"][username] = {
+                        "password": password,
+                        "name": user_name,
+                        "role": "player",
+                        "deck": available_decks[0] if available_decks else "Sin Mazo Asignado",
+                        "reset_requested": False
+                    }
+                    save_db(db)
+                    st.success("¡Cuenta creada! Ya puedes iniciar sesión.")
+                else:
+                    st.warning("Completa todos los campos obligatorios.")
 
     elif auth_mode == "Olvidé mi Contraseña":
-        reset_user = st.sidebar.text_input("Ingresa tu usuario:")
-        if st.sidebar.button("Solicitar Restablecimiento"):
-            if reset_user in db["users"]:
-                db["users"][reset_user]["reset_requested"] = True
-                save_db(db)
-                st.sidebar.success("Solicitud enviada al Administrador.")
-            else:
-                st.sidebar.error("El usuario no existe.")
+        with st.sidebar.form("reset_form"):
+            reset_user = st.text_input("Ingresa tu usuario:")
+            submit_reset = st.form_submit_button("Solicitar Restablecimiento")
+            
+            if submit_reset:
+                if reset_user in db["users"]:
+                    db["users"][reset_user]["reset_requested"] = True
+                    save_db(db)
+                    st.success("Solicitud enviada al Administrador.")
+                else:
+                    st.error("El usuario no existe.")
 
 else:
     cur_user = db["users"][st.session_state.logged_user]
@@ -240,7 +250,7 @@ is_admin = False
 if is_logged:
     is_admin = db["users"].get(st.session_state.logged_user, {}).get("role") == "admin"
 
-tabs = ["⚔️ Torneo Actual", "📊 Standings", "📜 Historial"]
+tabs = ["⚔️ Torneos", "📊 Standings", "📜 Historial"]
 if is_logged:
     tabs.append("👤 Mi Perfil")
 if is_admin:
@@ -249,40 +259,48 @@ if is_admin:
 tab_elements = st.tabs(tabs)
 
 # ------------------------------------------
-# TAB 1: TORNEO ACTUAL & ÚLTIMOS 5 TORNEOS
+# TAB 1: TORNEOS (ACTIVO / INSCRIPCIONES & HISTORIAL RECIENTE)
 # ------------------------------------------
 with tab_elements[0]:
     t_info = db["tournament"]
     
-    st.subheader("🎯 Torneo Disponible / Activo")
+    st.subheader("🎯 Torneo Activo / Próximo Evento")
     
     if t_info["status"] == "not_started":
-        st.info("No hay ningún torneo en curso en este momento. ¡Inscríbete para el próximo!")
-        if st.session_state.logged_user:
-            curr_u = st.session_state.logged_user
-            in_registered = curr_u in t_info["players"]
-            current_deck = db["users"][curr_u].get("deck", "Sin Mazo Asignado")
+        if t_info.get("name"):
+            # Hay un torneo creado y pendiente de iniciar
+            st.success(f"🏆 **Próximo Torneo:** {t_info['name']}")
             
-            st.write("#### Inscripción al Próximo Torneo")
-            st.write(f"Jugador: **{db['users'][curr_u]['name']}** | Mazo / Líder asignado: **{current_deck}**")
-            
-            col1, col2 = st.columns(2)
-            with col1:
-                if not in_registered:
-                    if st.button("Inscribirme al Torneo"):
-                        t_info["players"][curr_u] = {
-                            "points": 0, "dropped": False, "deck": current_deck, "history": []
-                        }
-                        save_db(db)
-                        st.success("¡Inscrito correctamente!")
-                        st.rerun()
-                else:
-                    st.success("Ya estás inscrito en el torneo.")
-                    if st.button("Cancelar Inscripción"):
-                        del t_info["players"][curr_u]
-                        save_db(db)
-                        st.warning("Inscripción cancelada.")
-                        st.rerun()
+            if st.session_state.logged_user:
+                curr_u = st.session_state.logged_user
+                in_registered = curr_u in t_info["players"]
+                current_deck = db["users"][curr_u].get("deck", "Sin Mazo Asignado")
+                
+                st.write("#### Inscripción al Torneo")
+                st.write(f"Jugador: **{db['users'][curr_u]['name']}** | Mazo / Líder asignado: **{current_deck}**")
+                
+                col1, col2 = st.columns(2)
+                with col1:
+                    if not in_registered:
+                        if st.button("Inscribirme al Torneo"):
+                            t_info["players"][curr_u] = {
+                                "points": 0, "dropped": False, "deck": current_deck, "history": []
+                            }
+                            save_db(db)
+                            st.success("¡Inscrito correctamente!")
+                            st.rerun()
+                    else:
+                        st.info("Ya estás inscrito en este torneo.")
+                        if st.button("Cancelar Inscripción"):
+                            del t_info["players"][curr_u]
+                            save_db(db)
+                            st.warning("Inscripción cancelada.")
+                            st.rerun()
+            else:
+                st.info("Inicia sesión para poder inscribirte al torneo.")
+        else:
+            # No hay ningún torneo creado en este momento
+            st.info("No hay ningún torneo abierto para inscripciones en este momento. El administrador creará uno próximamente.")
 
     elif t_info["status"] in ["active", "finished"]:
         st.write(f"### ⚔️ {t_info['name']} (Ronda {t_info['round']})")
@@ -433,7 +451,6 @@ if is_logged:
             st.write("### ✏️ Información Personal y Mazo")
             new_name = st.text_input("Nombre Visible / Nick:", value=user_data.get("name", ""))
             
-            # Selección de mazo mediante lista desplegable cargada de Google Sheets
             current_deck = user_data.get("deck", available_decks[0] if available_decks else "Sin Mazo Asignado")
             deck_index = available_decks.index(current_deck) if current_deck in available_decks else 0
             
@@ -443,12 +460,13 @@ if is_logged:
                 index=deck_index
             )
             
-            # Búsqueda y despliegue de la imagen del líder si existe en la carpeta 'images/'
-            img_filename = f"{selected_deck.lower().replace(' ', '_')}.png"
+            img_filename = f"{selected_deck}.png"
             img_path = os.path.join("images", img_filename)
             
             if os.path.exists(img_path):
                 st.image(img_path, caption=f"Líder: {selected_deck}", width=180)
+            else:
+                st.caption(f"ℹ️ (Sin imagen para '{selected_deck}'. Agrega '{img_filename}' en la carpeta /images del repositorio)")
             
             if st.button("Guardar Datos del Perfil"):
                 if new_name.strip():
@@ -552,17 +570,27 @@ if is_admin:
         t_data = db["tournament"]
 
         if t_data["status"] == "not_started":
-            st.write("### Crear Nuevo Torneo")
-            t_name = st.text_input("Nombre del Torneo", "Torneo Semanal OPTCG")
-            if st.button("Iniciar Torneo / Cerrar Inscripciones"):
-                if len(t_data["players"]) < 2:
-                    st.error("Se necesitan al menos 2 jugadores.")
-                else:
+            st.write("### Crear o Configurar Nuevo Torneo")
+            t_name = st.text_input("Nombre del Torneo", value=t_data.get("name") or "Torneo Semanal OPTCG")
+            
+            col_admin_t1, col_admin_t2 = st.columns(2)
+            with col_admin_t1:
+                if st.button("Guardar / Anunciar Torneo"):
                     t_data["name"] = t_name
-                    t_data["status"] = "active"
-                    generate_swiss_pairings(db)
-                    st.success("Torneo iniciado y Primera Ronda generada.")
+                    save_db(db)
+                    st.success(f"Torneo '{t_name}' guardado y abierto para inscripciones.")
                     st.rerun()
+                    
+            with col_admin_t2:
+                if st.button("Iniciar Torneo / Cerrar Inscripciones"):
+                    if len(t_data["players"]) < 2:
+                        st.error("Se necesitan al menos 2 jugadores inscritos.")
+                    else:
+                        t_data["name"] = t_name
+                        t_data["status"] = "active"
+                        generate_swiss_pairings(db)
+                        st.success("Torneo iniciado y Primera Ronda generada.")
+                        st.rerun()
 
         elif t_data["status"] == "active":
             st.write("### Avance de Rondas")
@@ -603,12 +631,13 @@ if is_admin:
             st.write("---")
             st.write("### Retiro (Drop) de Jugadores")
             active_p = [u for u, p in t_data["players"].items() if not p.get("dropped")]
-            drop_target = st.selectbox("Seleccionar Jugador para Drop:", active_p)
-            if st.button("Dropear Jugador"):
-                t_data["players"][drop_target]["dropped"] = True
-                save_db(db)
-                st.warning(f"{drop_target} ha sido retirado del torneo.")
-                st.rerun()
+            if active_p:
+                drop_target = st.selectbox("Seleccionar Jugador para Drop:", active_p)
+                if st.button("Dropear Jugador"):
+                    t_data["players"][drop_target]["dropped"] = True
+                    save_db(db)
+                    st.warning(f"{drop_target} ha sido retirado del torneo.")
+                    st.rerun()
 
             st.write("---")
             if st.button("Finalizar Torneo 🏆"):
@@ -628,6 +657,7 @@ if is_admin:
                 })
                 
                 t_data["status"] = "not_started"
+                t_data["name"] = ""
                 t_data["round"] = 0
                 t_data["players"] = {}
                 t_data["pairings"] = {}
