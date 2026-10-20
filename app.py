@@ -27,6 +27,19 @@ ADMIN_PASS = st.secrets.get("ADMIN_PASS", "admin123")
 conn = st.connection("gsheets", type=GSheetsConnection)
 
 # ==========================================
+# DIAGNÓSTICO DE CONEXIÓN A GOOGLE SHEETS
+# ==========================================
+with st.expander("🔍 Diagnóstico de Conexión a Google Sheets"):
+    try:
+        df_test = conn.read(worksheet="Users", ttl=0)
+        st.success("✅ ¡Conexión establecida con éxito a Google Sheets!")
+        st.write("Columnas detectadas en la hoja:", list(df_test.columns))
+        st.dataframe(df_test.head(5))
+    except Exception as e:
+        st.error("❌ Error al intentar conectar con Google Sheets:")
+        st.exception(e)
+
+# ==========================================
 # LECTURA / ESCRITURA EN GOOGLE SHEETS (HOJA ÚNICA: Users)
 # ==========================================
 def load_db():
