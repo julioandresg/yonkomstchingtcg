@@ -7,7 +7,6 @@ import requests
 # ==========================================
 # GESTIÓN DE SESIÓN PERSISTENTE (URL QUERY PARAMS)
 # ==========================================
-# Si la página se recarga, recupera el usuario desde la URL
 query_params = st.query_params
 if "logged_user" not in st.session_state:
     st.session_state.logged_user = query_params.get("user", None)
@@ -23,10 +22,7 @@ st.set_page_config(
 
 ADMIN_USER = st.secrets.get("ADMIN_USER")
 ADMIN_PASS = st.secrets.get("ADMIN_PASS")
-
-# URL CSV pública para lectura fallback / URL del WebApp de Google Apps Script para lectura y escritura
-CSV_URL = "https://docs.google.com/spreadsheets/d/e/2PACX-1vSlqNJBZPMhsOMkC887C9BwrZTVT_BDOVYv3N7yeYhmJ8SadH-dUBnVeyIHsZbSyZEpiSBoIjZSk8N0/pub?gid=0&single=true&output=csv"
-WEBAPP_URL = st.secrets.get("WEBAPP_URL", "") # Poner la URL obtenida de Google Apps Script en st.secrets
+WEBAPP_URL = st.secrets.get("WEBAPP_URL")
 
 def login_user(username):
     st.session_state.logged_user = username
@@ -38,7 +34,7 @@ def logout_user():
         del st.query_params["user"]
 
 # ==========================================
-# LECTURA / ESCRITURA CON PERSISTENCIA
+# LECTURA / ESCRITURA MEDIANTE WEBAPP
 # ==========================================
 def load_db():
     default_tourney = {
@@ -60,37 +56,39 @@ def load_db():
             "reset_requested": False
         }
     }
+    
+    default_decks = {
+        "OP17-Shanks": "Líder agresivo de los Piratas del Pelirrojo.",
+        "OP01-001 Zoro": "Líder Rojo agresivo con gran presión ofensiva."
+    }
 
     try:
-        # Intentar leer mediante la API WebApp (o fallback al CSV)
         df_all = pd.DataFrame()
         if WEBAPP_URL:
             res = requests.get(WEBAPP_URL, timeout=10)
             if res.status_code == 200:
                 raw_data = res.json()
                 if raw_data and len(raw_data) > 1:
-                    df_all = pd.DataFrame(raw_data[1:], columns=[str(c).strip().lower() for c in raw_data[0]])
+                    headers = [str(c).strip().lower() for c in raw_data[0]]
+                    df_all = pd.DataFrame(raw_data[1:], columns=headers)
         
         if df_all.empty:
-            df_all = pd.read_csv(CSV_URL)
-            df_all.columns = [str(col).strip().lower() for col in df_all.columns]
-
-        if df_all.empty:
-            return {"users": default_users, "tournament": default_tourney, "decks": {}}
+            return {"users": default_users, "tournament": default_tourney, "decks": default_decks}
 
         # 1. Cargar Usuarios (Cols A-G)
         users_dict = {}
         if 'username' in df_all.columns:
             for _, row in df_all.iterrows():
-                if pd.notna(row['username']) and str(row['username']).strip() != "":
-                    u_name = str(row['username']).strip()
+                u_val = row.get('username')
+                if pd.notna(u_val) and str(u_val).strip() != "":
+                    u_name = str(u_val).strip()
                     users_dict[u_name] = {
-                        "password": str(row['password']) if pd.notna(row['password']) else "",
-                        "name": str(row['name']) if pd.notna(row['name']) else u_name,
-                        "role": str(row['role']) if pd.notna(row['role']) else "player",
-                        "deck": str(row['deck']).strip() if (pd.notna(row['deck']) and str(row['deck']).strip() != "") else "Sin mazo asignado",
-                        "email": str(row['email']).strip() if ('email' in df_all.columns and pd.notna(row['email'])) else "",
-                        "reset_requested": bool(str(row['reset_requested'])).lower() == 'true' if pd.notna(row['reset_requested']) else False
+                        "password": str(row.get('password', '')) if pd.notna(row.get('password')) else "",
+                        "name": str(row.get('name', u_name)) if pd.notna(row.get('name')) else u_name,
+                        "role": str(row.get('role', 'player')) if pd.notna(row.get('role')) else "player",
+                        "deck": str(row.get('deck', 'Sin mazo asignado')).strip() if pd.notna(row.get('deck')) else "Sin mazo asignado",
+                        "email": str(row.get('email', '')).strip() if pd.notna(row.get('email')) else "",
+                        "reset_requested": str(row.get('reset_requested', 'false')).lower() == 'true'
                     }
                     
         if ADMIN_USER not in users_dict:
@@ -110,15 +108,19 @@ def load_db():
                     except Exception:
                         pass
 
-        # 3. Cargar Mazos y Descripciones (Cols P-Q)
+        # 3. Cargar Mazos (Cols P-Q)
         decks_dict = {}
         if 'deck_name' in df_all.columns:
             for _, row in df_all.iterrows():
-                if pd.notna(row['deck_name']) and str(row['deck_name']).strip() != "":
-                    d_name = str(row['deck_name']).strip()
+                d_name_val = row.get('deck_name')
+                if pd.notna(d_name_val) and str(d_name_val).strip() != "":
+                    d_name = str(d_name_val).strip()
                     if d_name.lower() != 'deck_name':
-                        d_desc = str(row['deck_description']).strip() if ('deck_description' in df_all.columns and pd.notna(row['deck_description'])) else "Sin descripción disponible."
-                        decks_dict[d_name] = d_desc
+                        d_desc = str(row.get('deck_description', 'Sin descripción.')).strip()
+                        decks_dict[d_name] = d_desc if d_desc else "Sin descripción."
+
+        if not decks_dict:
+            decks_dict = default_decks
 
         return {"users": users_dict, "tournament": tourney_dict, "decks": decks_dict}
 
@@ -126,12 +128,12 @@ def load_db():
         return {
             "users": default_users,
             "tournament": default_tourney,
-            "decks": {}
+            "decks": default_decks
         }
 
 def save_db(data):
     if not WEBAPP_URL:
-        st.warning("⚠️ No se ha configurado la URL de Apps Script (WEBAPP_URL) en secrets. Los cambios no se guardarán en Google Sheets.")
+        st.warning("⚠️ No se ha configurado la URL de Apps Script (WEBAPP_URL).")
         return
 
     try:
@@ -145,7 +147,6 @@ def save_db(data):
         for i in range(max_len):
             row = [""] * 17
             
-            # Datos Usuario (Cols A-G -> Índices 0-6)
             if i < len(u_keys):
                 u_id = u_keys[i]
                 u_data = data["users"][u_id]
@@ -157,12 +158,10 @@ def save_db(data):
                 row[5] = "TRUE" if u_data.get("reset_requested") else "FALSE"
                 row[6] = str(u_data.get("email", ""))
 
-            # Datos Torneo (Cols K-L -> Índices 10-11)
             if i == 0:
                 row[10] = "data"
                 row[11] = json.dumps(data["tournament"])
 
-            # Datos Mazos (Cols P-Q -> Índices 15-16)
             if i < len(deck_items):
                 row[15] = str(deck_items[i][0])
                 row[16] = str(deck_items[i][1])
@@ -170,13 +169,13 @@ def save_db(data):
             users_rows.append(row)
 
         payload = {"rows": users_rows}
-        res = requests.post(WEBAPP_URL, json=payload, timeout=10)
+        res = requests.post(WEBAPP_URL, json=payload, timeout=15)
         if res.status_code == 200:
-            st.toast("✅ Cambios guardados correctamente", icon="💾")
+            st.toast("✅ Base de datos sincronizada", icon="💾")
         else:
-            st.error("⚠️ Error al comunicarse con Google Sheets.")
+            st.error("⚠️ Error al guardar en Google Sheets.")
     except Exception as e:
-        st.error(f"⚠️ Error al guardar datos: {e}")
+        st.error(f"⚠️ Error de red al guardar: {e}")
 
 # Cargar base de datos
 db_full = load_db()
@@ -435,7 +434,7 @@ with tab_elements[2]:
         st.info("No hay torneos pasados.")
 
 # ------------------------------------------
-# TAB 4: MI PERFIL (CON IMAGEN Y DESCRIPCIÓN)
+# TAB 4: MI PERFIL
 # ------------------------------------------
 if is_logged:
     with tab_elements[3]:
@@ -450,7 +449,6 @@ if is_logged:
             new_name = st.text_input("Nombre Visible / Nick:", value=user_data.get("name", ""))
             new_email = st.text_input("Correo Electrónico registrado:", value=user_data.get("email", ""))
             
-            # Selección de mazo asignado
             options_deck = ["Sin mazo asignado"] + deck_names_list
             curr_deck_val = user_data.get("deck", "Sin mazo asignado")
             idx_deck = options_deck.index(curr_deck_val) if curr_deck_val in options_deck else 0
