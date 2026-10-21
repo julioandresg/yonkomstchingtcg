@@ -80,7 +80,7 @@ def load_db():
                     users_dict[u_name] = {
                         "password": str(row.get('password', '')) if pd.notna(row.get('password')) else "",
                         "name": str(row.get('name', u_name)) if pd.notna(row.get('name')) else u_name,
-                        "role": str(row.get('role', 'player')) if pd.notna(row.get('role')) else "player",
+                        "role": str(row.get('role', 'player')).strip().lower() if pd.notna(row.get('role')) else "player",
                         "deck": str(row.get('deck', 'Sin mazo asignado')).strip() if pd.notna(row.get('deck')) else "Sin mazo asignado",
                         "email": str(row.get('email', '')).strip() if pd.notna(row.get('email')) else "",
                         "reset_requested": str(row.get('reset_requested', 'false')).lower() == 'true'
@@ -93,7 +93,6 @@ def load_db():
         tourneys_dict = {}
         past_tourneys_list = []
         if 'key' in df_all.columns and 'value' in df_all.columns:
-            # Cargar Torneos Activos/Abiertos
             t_row = df_all.loc[df_all['key'].astype(str).str.strip().str.lower() == 'tournaments']
             if not t_row.empty:
                 val = t_row['value'].values[0]
@@ -105,7 +104,6 @@ def load_db():
                     except Exception:
                         pass
             else:
-                # Compatibilidad hacia atrás (si existía 'data' de un solo torneo)
                 legacy_row = df_all.loc[df_all['key'].astype(str).str.strip().str.lower() == 'data']
                 if not legacy_row.empty:
                     val = legacy_row['value'].values[0]
@@ -119,7 +117,6 @@ def load_db():
                         except Exception:
                             pass
 
-            # Cargar Historial
             past_row = df_all.loc[df_all['key'].astype(str).str.strip().str.lower() == 'past_tournaments']
             if not past_row.empty:
                 val_past = past_row['value'].values[0]
@@ -337,20 +334,28 @@ else:
         st.rerun()
 
 # ==========================================
-# NAVEGACIÓN PRINCIPAL
+# NAVEGACIÓN PRINCIPAL Y CONTROL DE ROLES
 # ==========================================
 st.title("🏆 Gestión de Torneos One Piece Card Game")
 
 is_logged = st.session_state.logged_user is not None and st.session_state.logged_user in db["users"]
-is_admin = False
-if is_logged:
-    is_admin = db["users"].get(st.session_state.logged_user, {}).get("role") == "admin"
+user_role = db["users"].get(st.session_state.logged_user, {}).get("role", "player") if is_logged else "guest"
+
+is_admin = user_role == "admin"
+is_mod = user_role == "mod"
+can_manage_tournaments = is_admin or is_mod
 
 tabs = ["⚔️ Torneos", "📊 Standings", "📜 Historial"]
 if is_logged:
     tabs.append("👤 Mi Perfil")
+
+# Gestión de cuentas: EXCLUSIVO PARA ADMIN
 if is_admin:
-    tabs.extend(["👥 Gestión de Cuentas", "⚙️ Admin Torneo"])
+    tabs.append("👥 Gestión de Cuentas")
+
+# Admin de Torneo: PERMITIDO PARA ADMIN Y MOD
+if can_manage_tournaments:
+    tabs.append("⚙️ Admin Torneo")
 
 tab_elements = st.tabs(tabs)
 
@@ -362,16 +367,14 @@ with tab_elements[0]:
     tournaments = db["tournaments"]
     
     if not tournaments:
-        st.info("No hay ningún torneo anunciado en este momento. El administrador creará uno próximamente.")
+        st.info("No hay ningún torneo anunciado en este momento. El administrador o moderador creará uno próximamente.")
     else:
-        # Selector para cambiar entre los torneos existentes
         tourney_options = {t_id: t_data["name"] for t_id, t_data in tournaments.items()}
         selected_t_id = st.selectbox("Selecciona un Torneo para ver o inscribirte:", options=list(tourney_options.keys()), format_func=lambda x: tourney_options[x])
         
         t_info = tournaments[selected_t_id]
         st.write("---")
         
-        # Torneo Abierto para inscripciones
         if t_info.get("status") == "not_started":
             st.success(f"🏆 **Torneo Anunciado:** {t_info['name']}")
             st.info("Las inscripciones están **abiertas**. Inscríbete a continuación con tu mazo asignado.")
@@ -415,7 +418,6 @@ with tab_elements[0]:
             else:
                 st.caption("Aún no hay jugadores inscritos.")
 
-        # Torneo en Curso (Activo)
         elif t_info.get("status") in ["active", "finished"]:
             st.write(f"### ⚔️ {t_info['name']} (Ronda {t_info.get('round', 0)})")
             
@@ -442,7 +444,7 @@ with tab_elements[0]:
                         st.write(f"**{p1_name}** ({p1_deck}) vs **{p2_name}** ({p2_deck})")
 
                         user = st.session_state.logged_user
-                        if match["result"] is None and (user in [match["p1"], match["p2"]] or is_admin):
+                        if match["result"] is None and (user in [match["p1"], match["p2"]] or can_manage_tournaments):
                             c1, c2 = st.columns(2)
                             winner = c1.selectbox("Ganador:", [p1_name, p2_name, "Empate"], key=f"win_{selected_t_id}_{t_info['round']}_{idx}")
                             first_player = c2.selectbox("¿Quién inició primero?:", [p1_name, p2_name], key=f"first_{selected_t_id}_{t_info['round']}_{idx}")
@@ -526,7 +528,8 @@ with tab_elements[2]:
 # TAB 4: MI PERFIL
 # ------------------------------------------
 if is_logged:
-    with tab_elements[3]:
+    current_tab_idx = 3
+    with tab_elements[current_tab_idx]:
         st.subheader("👤 MI PERFIL")
         curr_username = st.session_state.logged_user
         user_data = db["users"][curr_username]
@@ -587,29 +590,55 @@ if is_logged:
                     st.error("Las contraseñas no coinciden.")
 
 # ------------------------------------------
-# TAB 5: GESTIÓN DE CUENTAS (SOLO ADMINS)
+# TAB 5: GESTIÓN DE CUENTAS (EXCLUSIVO PARA ADMIN)
 # ------------------------------------------
 if is_admin:
-    with tab_elements[4]:
-        st.subheader("👥 Gestión de Cuentas")
+    admin_tab_idx = 4
+    with tab_elements[admin_tab_idx]:
+        st.subheader("👥 Gestión de Cuentas y Permisos (Solo Administrador)")
+        
         users_list = []
         for u_id, u_data in db["users"].items():
             users_list.append({
                 "Usuario": u_id,
                 "Nombre": u_data.get("name", ""),
                 "Correo": u_data.get("email", ""),
-                "Rol": u_data.get("role", "player"),
+                "Rol": u_data.get("role", "player").upper(),
                 "Mazo": u_data.get("deck", "Sin mazo asignado"),
                 "Reset Solicitado": "SÍ" if u_data.get("reset_requested") else "No"
             })
         st.dataframe(pd.DataFrame(users_list), use_container_width=True)
+        
+        st.write("---")
+        st.write("### 🛡️ Administración de Permisos y Roles")
+        
+        col_m1, col_m2 = st.columns(2)
+        with col_m1:
+            target_u = st.selectbox("Seleccionar Usuario:", list(db["users"].keys()))
+            
+        with col_m2:
+            current_target_role = db["users"][target_u].get("role", "player").lower()
+            role_options = ["player", "mod", "admin"]
+            role_index = role_options.index(current_target_role) if current_target_role in role_options else 0
+            
+            new_role = st.selectbox("Asignar Nuevo Rol:", role_options, index=role_index, format_func=lambda x: x.upper())
+            
+            if st.button("Guardar Nuevo Rol"):
+                if target_u == ADMIN_USER and new_role != "admin":
+                    st.error("No se puede cambiar el rol del Administrador Principal.")
+                else:
+                    db["users"][target_u]["role"] = new_role
+                    save_db({"users": db["users"], "tournaments": db["tournaments"], "past_tournaments": db["past_tournaments"], "decks": available_decks})
+                    st.success(f"Rol de {target_u} actualizado a '{new_role.upper()}' correctamente.")
+                    st.rerun()
 
 # ------------------------------------------
-# TAB 6: ADMIN TORNEOS MULTIPLES (SOLO ADMINS)
+# TAB 6: ADMIN TORNEOS MULTIPLES (ADMIN Y MOD)
 # ------------------------------------------
-if is_admin:
-    with tab_elements[5]:
-        st.subheader("⚙️ Panel de Control de Torneos Múltiples")
+if can_manage_tournaments:
+    t_tab_idx = 5 if is_admin else 4
+    with tab_elements[t_tab_idx]:
+        st.subheader("⚙️ Panel de Control de Torneos (Admin & Moderadores)")
         
         # 1. Crear Nuevo Torneo
         st.write("### 🆕 Anunciar Nuevo Torneo")
@@ -645,7 +674,6 @@ if is_admin:
             t_curr = db["tournaments"][adm_selected_t_id]
             st.write(f"**Estado del Torneo:** `{t_curr.get('status')}` | **Ronda:** {t_curr.get('round', 0)}")
             
-            # Si las inscripciones están abiertas
             if t_curr.get("status") == "not_started":
                 col_a1, col_a2 = st.columns(2)
                 with col_a1:
@@ -665,7 +693,6 @@ if is_admin:
                         st.warning("Torneo eliminado.")
                         st.rerun()
 
-            # Si el torneo está en curso
             elif t_curr.get("status") == "active":
                 curr_r = str(t_curr.get("round", 1))
                 matches = t_curr.get("pairings", {}).get(curr_r, [])
@@ -695,7 +722,6 @@ if is_admin:
                         "standings": t_curr["players"]
                     })
                     
-                    # Eliminar de torneos activos
                     del db["tournaments"][adm_selected_t_id]
                     save_db({"users": db["users"], "tournaments": db["tournaments"], "past_tournaments": db["past_tournaments"], "decks": available_decks})
                     st.success("¡Torneo finalizado y movido al Historial!")
