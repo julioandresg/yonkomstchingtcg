@@ -558,42 +558,60 @@ if is_admin:
         st.subheader("⚙️ Panel de Control de Torneo")
         t_data = db["tournament"]
 
+        # ESTADO 1: No iniciado o listo para anunciar
         if t_data.get("status") == "not_started":
-            st.write("### 🆕 Crear y Anunciar Nuevo Torneo")
+            st.write("### 🆕 Configurar y Anunciar Nuevo Torneo")
+            
+            # Nombre del torneo (si ya hay uno anunciado se mantiene su valor)
             t_name_input = st.text_input("Nombre del Torneo:", value=t_data.get("name") or "Torneo Semanal OPTCG")
             
             col_adm_btn1, col_adm_btn2 = st.columns(2)
+            
+            # BOTÓN 1: Anunciar torneo (SIN VALIDACIÓN DE JUGADORES)
             with col_adm_btn1:
                 if st.button("📢 Anunciar Torneo (Abrir Inscripciones)"):
-                    t_data["name"] = t_name_input
-                    t_data["status"] = "not_started"
-                    t_data["players"] = {}
-                    t_data["pairings"] = {}
-                    t_data["round"] = 0
-                    save_db({"users": db["users"], "tournament": t_data, "decks": available_decks})
-                    st.success(f"¡Torneo '{t_name_input}' anunciado! Los usuarios ya pueden inscribirse.")
-                    st.rerun()
-                    
-            with col_adm_btn2:
-                if st.button("🔒 Cerrar Inscripciones e Iniciar R1", type="primary"):
-                    if len(t_data.get("players", {})) < 2:
-                        st.error("Se necesitan al menos 2 jugadores inscritos para iniciar.")
+                    if not t_name_input.strip():
+                        st.error("Por favor escribe un nombre válido para el torneo.")
                     else:
-                        t_data["name"] = t_name_input
-                        t_data["status"] = "active"
-                        generate_swiss_pairings({"users": db["users"], "tournament": t_data, "decks": available_decks})
-                        st.success("¡Inscripciones cerradas y Primera Ronda generada con éxito!")
+                        t_data["name"] = t_name_input.strip()
+                        t_data["status"] = "not_started"
+                        t_data["players"] = {}
+                        t_data["pairings"] = {}
+                        t_data["round"] = 0
+                        save_db({"users": db["users"], "tournament": t_data, "decks": available_decks})
+                        st.success(f"¡Torneo '{t_name_input}' anunciado con éxito! Las inscripciones están abiertas.")
                         st.rerun()
+                    
+            # BOTÓN 2: Cerrar inscripciones e iniciar (CON VALIDACIÓN DE MÍNIMO 2 JUGADORES)
+            with col_adm_btn2:
+                # Solo se habilita el botón si el torneo ya fue anunciado previamente
+                if t_data.get("name"):
+                    if st.button("🔒 Cerrar Inscripciones e Iniciar R1", type="primary"):
+                        current_players = t_data.get("players", {})
+                        if len(current_players) < 2:
+                            st.error(f"❌ No se puede iniciar el torneo: Hay {len(current_players)} jugador(es) inscrito(s). Se requieren al menos 2.")
+                        else:
+                            t_data["status"] = "active"
+                            generate_swiss_pairings({"users": db["users"], "tournament": t_data, "decks": available_decks})
+                            st.success("¡Inscripciones cerradas! Torneo iniciado y Ronda 1 generada.")
+                            st.rerun()
+                else:
+                    st.caption("ℹ️ Primero debes anunciar el torneo para que los jugadores se inscriban.")
                         
             st.write("---")
-            st.write(f"👥 **Jugadores ya inscritos ({len(t_data.get('players', {}))}):**")
+            st.write(f"👥 **Jugadores Inscritos en Tiempo Real ({len(t_data.get('players', {}))}):**")
             if t_data.get("players"):
-                st.json(t_data["players"])
+                registered_list = []
+                for p_id, p_data in t_data["players"].items():
+                    p_name = db["users"].get(p_id, {}).get("name", p_id)
+                    registered_list.append({"Usuario": p_id, "Nombre": p_name, "Mazo": p_data.get("deck", "Sin mazo")})
+                st.dataframe(pd.DataFrame(registered_list), use_container_width=True)
             else:
-                st.caption("Ningún jugador inscrito todavía.")
+                st.caption("Aún no hay ningún jugador inscrito en este torneo.")
 
+        # ESTADO 2: Torneo Activo en curso
         elif t_data.get("status") == "active":
-            st.write(f"### ⚔️ Torneo en Curso: {t_data['name']} (Ronda {t_data['round']})")
+            st.write(f"### ⚔️ Torneo en Curso: **{t_data['name']}** (Ronda {t_data['round']})")
             
             curr_r = str(t_data["round"])
             matches = t_data["pairings"].get(curr_r, [])
@@ -602,7 +620,7 @@ if is_admin:
             if pending:
                 st.warning(f"Hay {len(pending)} partida(s) pendiente(s) en esta ronda.")
             else:
-                st.success("Todas las partidas de la ronda han sido reportadas.")
+                st.success("Todas las partidas de la ronda actual han sido completadas.")
                 if st.button("➡️ Generar Siguiente Ronda Suiza", type="primary"):
                     generate_swiss_pairings({"users": db["users"], "tournament": t_data, "decks": available_decks})
                     st.rerun()
