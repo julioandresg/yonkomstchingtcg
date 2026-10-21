@@ -20,9 +20,9 @@ st.set_page_config(
     initial_sidebar_state=sidebar_state
 )
 
-ADMIN_USER = st.secrets.get("ADMIN_USER")
-ADMIN_PASS = st.secrets.get("ADMIN_PASS")
-WEBAPP_URL = st.secrets.get("WEBAPP_URL")
+ADMIN_USER = st.secrets.get("ADMIN_USER", "zeloth")
+ADMIN_PASS = st.secrets.get("ADMIN_PASS", "admin123")
+WEBAPP_URL = st.secrets.get("WEBAPP_URL", "")
 
 def login_user(username):
     st.session_state.logged_user = username
@@ -322,53 +322,72 @@ tab_elements = st.tabs(tabs)
 # ------------------------------------------
 with tab_elements[0]:
     t_info = db["tournament"]
+    
     st.subheader("🎯 Torneo Activo / Próximo Evento")
     
     if t_info.get("status") == "not_started":
         if t_info.get("name"):
-            st.success(f"🏆 **Próximo Torneo:** {t_info['name']}")
+            st.success(f"🏆 **Torneo Anunciado:** {t_info['name']}")
+            st.info("Las inscripciones están **abiertas**. Inscríbete con tu mazo seleccionado desde tu perfil.")
+            
             if is_logged:
                 curr_u = st.session_state.logged_user
                 in_registered = curr_u in t_info["players"]
                 current_deck = db["users"][curr_u].get("deck", "Sin mazo asignado")
                 
-                st.write("#### Inscripción al Torneo")
-                st.write(f"Jugador: **{db['users'][curr_u]['name']}** | Mazo asignado: **{current_deck}**")
+                st.write("#### Tu Estado en el Torneo")
+                st.write(f"Jugador: **{db['users'][curr_u]['name']}** | Mazo registrado: **{current_deck}**")
                 
-                col1, col2 = st.columns(2)
-                with col1:
+                col_ins1, col_ins2 = st.columns(2)
+                with col_ins1:
                     if not in_registered:
-                        if st.button("Inscribirme al Torneo"):
+                        if st.button("Inscribirme al Torneo", type="primary"):
                             t_info["players"][curr_u] = {
                                 "points": 0, "dropped": False, "deck": current_deck, "history": []
                             }
                             save_db({"users": db["users"], "tournament": t_info, "decks": available_decks})
-                            st.success("¡Inscrito correctamente!")
+                            st.success("¡Te has inscrito correctamente!")
                             st.rerun()
                     else:
-                        st.info("Ya estás inscrito en este torneo.")
-                        if st.button("Cancelar Inscripción"):
+                        st.info("✅ Ya estás inscrito en este torneo.")
+                        if st.button("Cancelar mi Inscripción"):
                             del t_info["players"][curr_u]
                             save_db({"users": db["users"], "tournament": t_info, "decks": available_decks})
-                            st.warning("Inscripción cancelada.")
+                            st.warning("Has cancelado tu inscripción.")
                             st.rerun()
             else:
-                st.info("Inicia sesión para inscribirte al torneo.")
+                st.info("Inicia sesión en la barra lateral para poder inscribirte al torneo.")
+                
+            st.write("---")
+            st.write(f"👥 **Jugadores Inscritos ({len(t_info.get('players', {}))}):**")
+            if t_info.get("players"):
+                registered_list = []
+                for p_id, p_data in t_info["players"].items():
+                    p_name = db["users"].get(p_id, {}).get("name", p_id)
+                    registered_list.append({"Jugador": p_name, "Mazo": p_data.get("deck", "Sin mazo")})
+                st.dataframe(pd.DataFrame(registered_list), use_container_width=True)
+            else:
+                st.caption("Aún no hay jugadores inscritos.")
         else:
-            st.info("No hay ningún torneo abierto para inscripciones en este momento.")
+            st.info("No hay ningún torneo anunciado en este momento. El administrador creará uno próximamente.")
 
     elif t_info.get("status") in ["active", "finished"]:
         st.write(f"### ⚔️ {t_info['name']} (Ronda {t_info['round']})")
+        
         curr_round_str = str(t_info["round"])
         round_matches = t_info["pairings"].get(curr_round_str, [])
         
+        st.write("#### Emparejamientos de la Ronda Actual")
+        
         for idx, match in enumerate(round_matches):
             p1_name = db["users"].get(match["p1"], {}).get("name", match["p1"])
+            
             if match["p2"] is None:
                 st.success(f"🔹 **Mesa {idx+1}:** {p1_name} tiene **BYE** (+3 pts)")
                 continue
 
             p2_name = db["users"].get(match["p2"], {}).get("name", match["p2"])
+            
             with st.expander(f"Mesa {idx+1}: {p1_name} vs {p2_name} | Estado: {match['result'] or 'Pendiente'}"):
                 p1_deck = t_info["players"].get(match["p1"], {}).get("deck", "N/A")
                 p2_deck = t_info["players"].get(match["p2"], {}).get("deck", "N/A")
@@ -397,6 +416,22 @@ with tab_elements[0]:
                         match["first"] = match["p1"] if first_player == p1_name else match["p2"]
                         save_db({"users": db["users"], "tournament": t_info, "decks": available_decks})
                         st.rerun()
+
+    st.write("---")
+    st.subheader("🏅 Últimos Torneos Realizados")
+    past_tourneys = db["tournament"].get("past_tournaments", [])
+    if past_tourneys:
+        summary_rows = []
+        for t in list(reversed(past_tourneys))[:5]:
+            summary_rows.append({
+                "Torneo": t.get("name", "Torneo"),
+                "Ganador 👑": t.get("winner_name", "N/A"),
+                "Mazo Ganador 🎴": t.get("winner_deck", "N/A"),
+                "Rondas": t.get("total_rounds", "N/A")
+            })
+        st.dataframe(pd.DataFrame(summary_rows), use_container_width=True)
+    else:
+        st.caption("Aún no hay historial de torneos finalizados.")
 
 # ------------------------------------------
 # TAB 2: STANDINGS
@@ -520,15 +555,98 @@ if is_admin:
 # ------------------------------------------
 if is_admin:
     with tab_elements[5]:
-        st.subheader("⚙️ Controles de Administrador")
+        st.subheader("⚙️ Panel de Control de Torneo")
         t_data = db["tournament"]
+
+        # ESTADO 1: No iniciado o listo para anunciar
         if t_data.get("status") == "not_started":
-            t_name = st.text_input("Nombre del Torneo", value=t_data.get("name") or "Torneo Semanal OPTCG")
-            if st.button("Iniciar Torneo / Cerrar Inscripciones"):
-                if len(t_data["players"]) >= 2:
-                    t_data["name"] = t_name
-                    t_data["status"] = "active"
+            st.write("### 🆕 Configurar y Anunciar Nuevo Torneo")
+            
+            # Nombre del torneo (si ya hay uno anunciado se mantiene su valor)
+            t_name_input = st.text_input("Nombre del Torneo:", value=t_data.get("name") or "Torneo Semanal OPTCG")
+            
+            col_adm_btn1, col_adm_btn2 = st.columns(2)
+            
+            # BOTÓN 1: Anunciar torneo (SIN VALIDACIÓN DE JUGADORES)
+            with col_adm_btn1:
+                if st.button("📢 Anunciar Torneo (Abrir Inscripciones)"):
+                    if not t_name_input.strip():
+                        st.error("Por favor escribe un nombre válido para el torneo.")
+                    else:
+                        t_data["name"] = t_name_input.strip()
+                        t_data["status"] = "not_started"
+                        t_data["players"] = {}
+                        t_data["pairings"] = {}
+                        t_data["round"] = 0
+                        save_db({"users": db["users"], "tournament": t_data, "decks": available_decks})
+                        st.success(f"¡Torneo '{t_name_input}' anunciado con éxito! Las inscripciones están abiertas.")
+                        st.rerun()
+                    
+            # BOTÓN 2: Cerrar inscripciones e iniciar (CON VALIDACIÓN DE MÍNIMO 2 JUGADORES)
+            with col_adm_btn2:
+                # Solo se habilita el botón si el torneo ya fue anunciado previamente
+                if t_data.get("name"):
+                    if st.button("🔒 Cerrar Inscripciones e Iniciar R1", type="primary"):
+                        current_players = t_data.get("players", {})
+                        if len(current_players) < 2:
+                            st.error(f"❌ No se puede iniciar el torneo: Hay {len(current_players)} jugador(es) inscrito(s). Se requieren al menos 2.")
+                        else:
+                            t_data["status"] = "active"
+                            generate_swiss_pairings({"users": db["users"], "tournament": t_data, "decks": available_decks})
+                            st.success("¡Inscripciones cerradas! Torneo iniciado y Ronda 1 generada.")
+                            st.rerun()
+                else:
+                    st.caption("ℹ️ Primero debes anunciar el torneo para que los jugadores se inscriban.")
+                        
+            st.write("---")
+            st.write(f"👥 **Jugadores Inscritos en Tiempo Real ({len(t_data.get('players', {}))}):**")
+            if t_data.get("players"):
+                registered_list = []
+                for p_id, p_data in t_data["players"].items():
+                    p_name = db["users"].get(p_id, {}).get("name", p_id)
+                    registered_list.append({"Usuario": p_id, "Nombre": p_name, "Mazo": p_data.get("deck", "Sin mazo")})
+                st.dataframe(pd.DataFrame(registered_list), use_container_width=True)
+            else:
+                st.caption("Aún no hay ningún jugador inscrito en este torneo.")
+
+        # ESTADO 2: Torneo Activo en curso
+        elif t_data.get("status") == "active":
+            st.write(f"### ⚔️ Torneo en Curso: **{t_data['name']}** (Ronda {t_data['round']})")
+            
+            curr_r = str(t_data["round"])
+            matches = t_data["pairings"].get(curr_r, [])
+            pending = [m for m in matches if m["result"] is None and m["p2"] is not None]
+            
+            if pending:
+                st.warning(f"Hay {len(pending)} partida(s) pendiente(s) en esta ronda.")
+            else:
+                st.success("Todas las partidas de la ronda actual han sido completadas.")
+                if st.button("➡️ Generar Siguiente Ronda Suiza", type="primary"):
                     generate_swiss_pairings({"users": db["users"], "tournament": t_data, "decks": available_decks})
                     st.rerun()
-                else:
-                    st.error("Se necesitan al menos 2 jugadores inscritos.")
+
+            st.write("---")
+            if st.button("🏆 Finalizar Torneo Actual", type="primary"):
+                t_data["status"] = "finished"
+                sorted_p = sorted(t_data["players"].items(), key=lambda x: x[1]["points"], reverse=True)
+                winner_user = sorted_p[0][0] if sorted_p else "N/A"
+                winner_name = db["users"].get(winner_user, {}).get("name", winner_user)
+                winner_deck = t_data["players"].get(winner_user, {}).get("deck", "N/A")
+                
+                t_data.setdefault("past_tournaments", []).append({
+                    "name": t_data["name"],
+                    "total_rounds": t_data["round"],
+                    "winner_user": winner_user,
+                    "winner_name": winner_name,
+                    "winner_deck": winner_deck,
+                    "standings": t_data["players"]
+                })
+                
+                t_data["status"] = "not_started"
+                t_data["name"] = ""
+                t_data["round"] = 0
+                t_data["players"] = {}
+                t_data["pairings"] = {}
+                save_db({"users": db["users"], "tournament": t_data, "decks": available_decks})
+                st.success("¡Torneo finalizado y guardado en el historial!")
+                st.rerun()
