@@ -2,6 +2,7 @@ import streamlit as st
 import pandas as pd
 import json
 import os
+import glob
 import requests
 import uuid
 
@@ -33,6 +34,46 @@ def logout_user():
     st.session_state.logged_user = None
     if "user" in st.query_params:
         del st.query_params["user"]
+
+# ==========================================
+# BÚSQUEDA DINÁMICA DE IMÁGENES EN SUBCARPETAS
+# ==========================================
+def find_leader_image(deck_name):
+    """
+    Busca recursivamente la imagen del mazo/líder dentro de 'images/' 
+    y todas sus subcarpetas (ej. images/lider/op11/Nami.png).
+    """
+    if not deck_name or deck_name == "Sin mazo asignado":
+        return None
+
+    base_dir = "images"
+    if not os.path.exists(base_dir):
+        return None
+
+    # Formatos y nombres posibles a buscar
+    clean_name = deck_name.strip()
+    possible_filenames = [
+        f"{clean_name}.png", f"{clean_name}.jpg", f"{clean_name}.jpeg", f"{clean_name}.webp",
+        f"{clean_name.lower()}.png", f"{clean_name.lower()}.jpg"
+    ]
+
+    # Si viene con formato OP17-Shanks, también intentar buscar solo "Shanks"
+    if "-" in clean_name:
+        parts = clean_name.split("-", 1)
+        sub_name = parts[1].strip()
+        possible_filenames.extend([
+            f"{sub_name}.png", f"{sub_name}.jpg",
+            f"{sub_name.lower()}.png", f"{sub_name.lower()}.jpg"
+        ])
+
+    # Escanear recursivamente la carpeta images y sus subdirectorios
+    for root, _, files in os.walk(base_dir):
+        for file in files:
+            for target in possible_filenames:
+                if file.lower() == target.lower():
+                    return os.path.join(root, file)
+
+    return None
 
 # ==========================================
 # LECTURA / ESCRITURA MEDIANTE WEBAPP
@@ -349,11 +390,9 @@ tabs = ["⚔️ Torneos", "📊 Standings", "📜 Historial"]
 if is_logged:
     tabs.append("👤 Mi Perfil")
 
-# Gestión de cuentas: EXCLUSIVO PARA ADMIN
 if is_admin:
     tabs.append("👥 Gestión de Cuentas")
 
-# Admin de Torneo: PERMITIDO PARA ADMIN Y MOD
 if can_manage_tournaments:
     tabs.append("⚙️ Admin Torneo")
 
@@ -525,7 +564,7 @@ with tab_elements[2]:
         st.info("No hay torneos pasados registrados.")
 
 # ------------------------------------------
-# TAB 4: MI PERFIL
+# TAB 4: MI PERFIL (CON BÚSQUEDA DE IMAGEN RECURSIVA)
 # ------------------------------------------
 if is_logged:
     current_tab_idx = 3
@@ -550,12 +589,15 @@ if is_logged:
             st.write("---")
             if selected_deck != "Sin mazo asignado":
                 col_img, col_desc = st.columns([1, 2])
-                img_path = os.path.join("images", f"{selected_deck}.png")
+                
+                # BÚSQUEDA AUTOMÁTICA EN EN SUBCARPETAS (Ej: images/lider/op11/Nami.png)
+                img_found_path = find_leader_image(selected_deck)
+                
                 with col_img:
-                    if os.path.exists(img_path):
-                        st.image(img_path, caption=selected_deck, use_column_width=True)
+                    if img_found_path:
+                        st.image(img_found_path, caption=selected_deck, use_column_width=True)
                     else:
-                        st.caption(f"ℹ️ (Agrega {selected_deck}.png en /images)")
+                        st.caption(f"ℹ️ (Agrega la imagen de '{selected_deck}' dentro de /images o sus subcarpetas)")
                 with col_desc:
                     st.write("**Descripción del Líder:**")
                     st.info(available_decks.get(selected_deck, "Sin descripción registrada."))
