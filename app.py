@@ -38,10 +38,6 @@ def logout_user():
 # BÚSQUEDA Y ESCANEO DINÁMICO DE IMÁGENES
 # ==========================================
 def find_leader_image(deck_name):
-    """
-    Busca recursivamente la imagen del mazo/líder dentro de 'images/'
-    y todas sus subcarpetas (ej. images/lider/op11/Nami.png).
-    """
     if not deck_name or deck_name == "Sin mazo asignado":
         return None
 
@@ -72,11 +68,6 @@ def find_leader_image(deck_name):
     return None
 
 def get_expansions_and_leaders(base_path="images/lider"):
-    """
-    Escanea la carpeta de imágenes y devuelve un diccionario con las expansiones
-    y los líderes encontrados dentro de cada una.
-    Ejemplo: {'OP11': ['Nami', 'Zoro'], 'OP17': ['Shanks']}
-    """
     expansions = {}
     if not os.path.exists(base_path):
         return expansions
@@ -131,7 +122,7 @@ def load_db():
         if df_all.empty:
             return {"users": default_users, "tournaments": default_tourneys, "past_tournaments": default_past_tourneys, "decks": default_decks}
 
-        # 1. Cargar Usuarios (Cols A-G)
+        # 1. Cargar Usuarios
         users_dict = {}
         if 'username' in df_all.columns:
             for _, row in df_all.iterrows():
@@ -150,7 +141,7 @@ def load_db():
         if ADMIN_USER not in users_dict:
             users_dict[ADMIN_USER] = default_users[ADMIN_USER]
 
-        # 2. Cargar Torneos Activos e Historial (Cols K-L)
+        # 2. Cargar Torneos Activos e Historial
         tourneys_dict = {}
         past_tourneys_list = []
         if 'key' in df_all.columns and 'value' in df_all.columns:
@@ -187,7 +178,7 @@ def load_db():
                     except Exception:
                         pass
 
-        # 3. Cargar Mazos (Cols P-Q)
+        # 3. Cargar Mazos
         decks_dict = {}
         if 'deck_name' in df_all.columns:
             for _, row in df_all.iterrows():
@@ -227,7 +218,6 @@ def save_db(data):
         for i in range(max_len):
             row = [""] * 17
             
-            # Usuarios (Cols A-G -> 0-6)
             if i < len(u_keys):
                 u_id = u_keys[i]
                 u_data = data["users"][u_id]
@@ -239,7 +229,6 @@ def save_db(data):
                 row[5] = "TRUE" if u_data.get("reset_requested") else "FALSE"
                 row[6] = str(u_data.get("email", ""))
 
-            # Torneos (Cols K-L -> 10-11)
             if i == 0:
                 row[10] = "tournaments"
                 row[11] = json.dumps(data["tournaments"])
@@ -247,7 +236,6 @@ def save_db(data):
                 row[10] = "past_tournaments"
                 row[11] = json.dumps(data.get("past_tournaments", []))
 
-            # Mazos (Cols P-Q -> 15-16)
             if i < len(deck_items):
                 row[15] = str(deck_items[i][0])
                 row[16] = str(deck_items[i][1])
@@ -274,8 +262,32 @@ available_decks = db_full["decks"]
 deck_names_list = list(available_decks.keys())
 
 # ==========================================
-# LÓGICA DE RONDA SUIZA
+# AUXILIARES Y LÓGICA DE TORNEO
 # ==========================================
+def finish_tournament_logic(t_id, db_data, explicit_winner_user=None):
+    """
+    Cierra un torneo, calcula al ganador y lo traslada al historial de torneos pasados.
+    """
+    t_curr = db_data["tournaments"][t_id]
+    t_curr["status"] = "finished"
+    
+    sorted_p = sorted(t_curr["players"].items(), key=lambda x: x[1]["points"], reverse=True)
+    winner_user = explicit_winner_user or (sorted_p[0][0] if sorted_p else "N/A")
+    winner_name = db_data["users"].get(winner_user, {}).get("name", winner_user)
+    winner_deck = t_curr["players"].get(winner_user, {}).get("deck", "N/A")
+    
+    db_data.setdefault("past_tournaments", []).append({
+        "name": t_curr["name"],
+        "total_rounds": t_curr["round"],
+        "winner_user": winner_user,
+        "winner_name": winner_name,
+        "winner_deck": winner_deck,
+        "standings": t_curr["players"]
+    })
+    
+    del db_data["tournaments"][t_id]
+    save_db({"users": db_data["users"], "tournaments": db_data["tournaments"], "past_tournaments": db_data["past_tournaments"], "decks": available_decks})
+
 def generate_swiss_pairings_for_tournament(t_id, db_data):
     t_data = db_data["tournaments"][t_id]
     active_players = [u for u, p in t_data["players"].items() if not p.get("dropped", False)]
@@ -323,6 +335,27 @@ def generate_swiss_pairings_for_tournament(t_id, db_data):
         "past_tournaments": db_data["past_tournaments"],
         "decks": available_decks
     })
+
+def render_standings_table(t_players_data, users_db):
+    """
+    Renderiza la tabla de posiciones (Standings) formateada.
+    """
+    if not t_players_data:
+        st.caption("Sin datos de posiciones disponibles.")
+        return
+
+    standings_rows = []
+    for username, pdata in t_players_data.items():
+        u_info = users_db.get(username, {})
+        standings_rows.append({
+            "Jugador": u_info.get("name", username),
+            "Mazo": pdata.get("deck", "Sin mazo asignado"),
+            "Puntos": pdata.get("points", 0),
+            "Estado": "DROPPED" if pdata.get("dropped") else "Activo"
+        })
+    df = pd.DataFrame(standings_rows).sort_values(by=["Puntos"], ascending=False).reset_index(drop=True)
+    df.index += 1
+    st.dataframe(df, use_container_width=True)
 
 # ==========================================
 # BARRA LATERAL: AUTENTICACIÓN
@@ -406,7 +439,7 @@ is_admin = user_role == "admin"
 is_mod = user_role == "mod"
 can_manage_tournaments = is_admin or is_mod
 
-tabs = ["⚔️ Torneos", "📊 Standings", "📜 Historial"]
+tabs = ["⚔️ Torneos", "📜 Historial"]
 if is_logged:
     tabs.append("👤 Mi Perfil")
 
@@ -419,7 +452,7 @@ if can_manage_tournaments:
 tab_elements = st.tabs(tabs)
 
 # ------------------------------------------
-# TAB 1: TORNEOS MULTIPLES
+# TAB 1: TORNEOS MULTIPLES (PAREOS + STANDINGS BAJO PAREOS)
 # ------------------------------------------
 with tab_elements[0]:
     st.subheader("🎯 Torneos Activos y Próximos Eventos")
@@ -429,11 +462,12 @@ with tab_elements[0]:
         st.info("No hay ningún torneo anunciado en este momento. El administrador o moderador creará uno próximamente.")
     else:
         tourney_options = {t_id: t_data["name"] for t_id, t_data in tournaments.items()}
-        selected_t_id = st.selectbox("Selecciona un Torneo para ver o inscribirte:", options=list(tourney_options.keys()), format_func=lambda x: tourney_options[x])
+        selected_t_id = st.selectbox("Selecciona un Torneo para interactuar:", options=list(tourney_options.keys()), format_func=lambda x: tourney_options[x])
         
         t_info = tournaments[selected_t_id]
         st.write("---")
         
+        # ESTADO 1: No iniciado (Inscripciones abiertas)
         if t_info.get("status") == "not_started":
             st.success(f"🏆 **Torneo Anunciado:** {t_info['name']}")
             st.info("Las inscripciones están **abiertas**. Inscríbete a continuación con tu mazo asignado.")
@@ -477,13 +511,14 @@ with tab_elements[0]:
             else:
                 st.caption("Aún no hay jugadores inscritos.")
 
+        # ESTADO 2: Torneo Activo en curso
         elif t_info.get("status") in ["active", "finished"]:
             st.write(f"### ⚔️ {t_info['name']} (Ronda {t_info.get('round', 0)})")
             
             curr_round_str = str(t_info.get("round", 1))
             round_matches = t_info.get("pairings", {}).get(curr_round_str, [])
             
-            st.write("#### Emparejamientos de la Ronda Actual")
+            st.write("#### 🥊 Emparejamientos de la Ronda Actual")
             
             if not round_matches:
                 st.caption("Generando emparejamientos...")
@@ -526,68 +561,36 @@ with tab_elements[0]:
                                 save_db({"users": db["users"], "tournaments": db["tournaments"], "past_tournaments": db["past_tournaments"], "decks": available_decks})
                                 st.rerun()
 
-    st.write("---")
-    st.subheader("🏅 Últimos Torneos Realizados")
-    past_tourneys = db.get("past_tournaments", [])
-    if past_tourneys:
-        summary_rows = []
-        for t in list(reversed(past_tourneys))[:5]:
-            summary_rows.append({
-                "Torneo": t.get("name", "Torneo"),
-                "Ganador 👑": t.get("winner_name", "N/A"),
-                "Mazo Ganador 🎴": t.get("winner_deck", "N/A"),
-                "Rondas": t.get("total_rounds", "N/A")
-            })
-        st.dataframe(pd.DataFrame(summary_rows), use_container_width=True)
-    else:
-        st.caption("Aún no hay historial de torneos finalizados.")
+            # TABLA DE POSICIONES MOSTRADA JUSTO DEBAJO DE LOS PAREOS DE ESTE TORNEO
+            st.write("---")
+            st.write("#### 📊 Tabla de Posiciones en Tiempo Real (Standings)")
+            render_standings_table(t_info.get("players", {}), db["users"])
 
 # ------------------------------------------
-# TAB 2: STANDINGS (POR TORNEO)
+# TAB 2: HISTORIAL
 # ------------------------------------------
 with tab_elements[1]:
-    st.subheader("📊 Tabla de Posiciones")
-    if db["tournaments"]:
-        sel_t_standings = st.selectbox("Seleccionar Torneo para ver Posiciones:", options=list(db["tournaments"].keys()), format_func=lambda x: db["tournaments"][x]["name"], key="standings_selector")
-        t_stand_data = db["tournaments"][sel_t_standings]
-        
-        if t_stand_data.get("players"):
-            standings_data = []
-            for username, pdata in t_stand_data["players"].items():
-                u_info = db["users"].get(username, {})
-                standings_data.append({
-                    "Jugador": u_info.get("name", username),
-                    "Mazo": pdata.get("deck", "Sin mazo asignado"),
-                    "Puntos": pdata.get("points", 0),
-                    "Estado": "DROPPED" if pdata.get("dropped") else "Activo"
-                })
-            df = pd.DataFrame(standings_data).sort_values(by=["Puntos"], ascending=False).reset_index(drop=True)
-            df.index += 1
-            st.dataframe(df, use_container_width=True)
-        else:
-            st.info("Aún no hay jugadores registrados en este torneo.")
-    else:
-        st.info("No hay torneos activos.")
-
-# ------------------------------------------
-# TAB 3: HISTORIAL
-# ------------------------------------------
-with tab_elements[2]:
     st.subheader("📜 Historial de Torneos Finalizados")
     past_list = db.get("past_tournaments", [])
     if past_list:
         for past in reversed(past_list):
-            with st.expander(f"🏆 {past['name']} — Ganador: {past.get('winner_name', 'N/A')}"):
-                st.write(f"Rondas totales: {past.get('total_rounds')}")
-                st.json(past.get("standings", {}))
+            w_name = past.get("winner_name", "N/A")
+            w_deck = past.get("winner_deck", "N/A")
+            
+            with st.expander(f"🏆 {past['name']} — Ganador: {w_name} ({w_deck})"):
+                st.success(f"👑 **Campeón del Torneo:** {w_name} | **Mazo / Líder:** {w_deck}")
+                st.write(f"**Rondas Totales:** {past.get('total_rounds', 'N/A')}")
+                st.write("---")
+                st.write("#### 📊 Standings Finales del Torneo:")
+                render_standings_table(past.get("standings", {}), db["users"])
     else:
-        st.info("No hay torneos pasados registrados.")
+        st.info("No hay torneos pasados registrados en el historial.")
 
 # ------------------------------------------
-# TAB 4: MI PERFIL (CON DESPLEGABLES POR EXPANSIÓN)
+# TAB 3: MI PERFIL (CON BÚSQUEDA DE IMAGEN RECURSIVA)
 # ------------------------------------------
 if is_logged:
-    current_tab_idx = 3
+    current_tab_idx = 2
     with tab_elements[current_tab_idx]:
         st.subheader("👤 MI PERFIL")
         curr_username = st.session_state.logged_user
@@ -607,7 +610,6 @@ if is_logged:
             curr_deck_val = user_data.get("deck", "Sin mazo asignado")
             
             if not exp_data:
-                # Fallback al selector simple si no existen las subcarpetas images/lider/
                 options_deck = ["Sin mazo asignado"] + deck_names_list
                 idx_deck = options_deck.index(curr_deck_val) if curr_deck_val in options_deck else 0
                 selected_deck = st.selectbox("Mazo / Líder Habitual:", options=options_deck, index=idx_deck)
@@ -667,7 +669,7 @@ if is_logged:
             
             if st.button("Actualizar Contraseña"):
                 if curr_pass_input != user_data["password"]:
-                    st.error("La contraseña actual es incorrecta.")
+                    st.error("La contraseña actual is incorrecta.")
                 elif new_pass_input and new_pass_input == confirm_pass_input:
                     db["users"][curr_username]["password"] = new_pass_input
                     db["users"][curr_username]["reset_requested"] = False
@@ -678,10 +680,10 @@ if is_logged:
                     st.error("Las contraseñas no coinciden.")
 
 # ------------------------------------------
-# TAB 5: GESTIÓN DE CUENTAS (EXCLUSIVO PARA ADMIN)
+# TAB 4: GESTIÓN DE CUENTAS (EXCLUSIVO PARA ADMIN)
 # ------------------------------------------
 if is_admin:
-    admin_tab_idx = 4
+    admin_tab_idx = 3
     with tab_elements[admin_tab_idx]:
         st.subheader("👥 Gestión de Cuentas y Permisos (Solo Administrador)")
         
@@ -721,10 +723,10 @@ if is_admin:
                     st.rerun()
 
 # ------------------------------------------
-# TAB 6: ADMIN TORNEOS MULTIPLES (ADMIN Y MOD)
+# TAB 5: ADMIN TORNEOS MULTIPLES (ADMIN Y MOD)
 # ------------------------------------------
 if can_manage_tournaments:
-    t_tab_idx = 5 if is_admin else 4
+    t_tab_idx = 4 if is_admin else 3
     with tab_elements[t_tab_idx]:
         st.subheader("⚙️ Panel de Control de Torneos (Admin & Moderadores)")
         
@@ -789,29 +791,39 @@ if can_manage_tournaments:
                 if pending:
                     st.warning(f"Hay {len(pending)} partida(s) pendiente(s) en este torneo.")
                 else:
-                    st.success("Todas las partidas de la ronda han sido reportadas.")
-                    if st.button("➡️ Generar Siguiente Ronda Suiza", type="primary", key=f"next_r_{adm_selected_t_id}"):
-                        generate_swiss_pairings_for_tournament(adm_selected_t_id, db)
-                        st.rerun()
+                    st.success("Todas las partidas de la ronda actual han sido completadas.")
+                    
+                    # EVALUACIÓN DE GANADOR ÚNICO (SISTEMA SUIZO CERRADO)
+                    active_players_list = [p for p in t_curr["players"].items() if not p[1].get("dropped")]
+                    active_players_list.sort(key=lambda x: x[1]["points"], reverse=True)
+                    
+                    has_single_winner = False
+                    single_winner_user = None
+                    
+                    if len(active_players_list) >= 1:
+                        top_points = active_players_list[0][1]["points"]
+                        # Verificar si el segundo lugar (si existe) tiene estrictamente menos puntos
+                        if len(active_players_list) == 1 or active_players_list[1][1]["points"] < top_points:
+                            has_single_winner = True
+                            single_winner_user = active_players_list[0][0]
+
+                    if has_single_winner:
+                        winner_display_name = db["users"].get(single_winner_user, {}).get("name", single_winner_user)
+                        st.balloons()
+                        st.success(f"🏆 **¡Tenemos un único Ganador Absoluto!** {winner_display_name} lidera la tabla de posiciones en solitario con {top_points} pts.")
+                        st.info("El torneo debe finalizarse ahora ya que el ganador ha sido determinado de forma definitiva.")
+                        
+                        if st.button("🏆 Finalizar y Proclamar Ganador", type="primary", key=f"auto_finish_{adm_selected_t_id}"):
+                            finish_tournament_logic(adm_selected_t_id, db, explicit_winner_user=single_winner_user)
+                            st.rerun()
+                    else:
+                        if st.button("➡️ Generar Siguiente Ronda Suiza", type="primary", key=f"next_r_{adm_selected_t_id}"):
+                            generate_swiss_pairings_for_tournament(adm_selected_t_id, db)
+                            st.rerun()
 
                 st.write("---")
-                if st.button("🏆 Finalizar Torneo", type="primary", key=f"finish_{adm_selected_t_id}"):
-                    sorted_p = sorted(t_curr["players"].items(), key=lambda x: x[1]["points"], reverse=True)
-                    winner_user = sorted_p[0][0] if sorted_p else "N/A"
-                    winner_name = db["users"].get(winner_user, {}).get("name", winner_user)
-                    winner_deck = t_curr["players"].get(winner_user, {}).get("deck", "N/A")
-                    
-                    db.setdefault("past_tournaments", []).append({
-                        "name": t_curr["name"],
-                        "total_rounds": t_curr["round"],
-                        "winner_user": winner_user,
-                        "winner_name": winner_name,
-                        "winner_deck": winner_deck,
-                        "standings": t_curr["players"]
-                    })
-                    
-                    del db["tournaments"][adm_selected_t_id]
-                    save_db({"users": db["users"], "tournaments": db["tournaments"], "past_tournaments": db["past_tournaments"], "decks": available_decks})
+                if st.button("🏆 Finalizar Torneo Manualmente", key=f"finish_manual_{adm_selected_t_id}"):
+                    finish_tournament_logic(adm_selected_t_id, db)
                     st.success("¡Torneo finalizado y movido al Historial!")
                     st.rerun()
 
