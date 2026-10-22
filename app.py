@@ -2,7 +2,6 @@ import streamlit as st
 import pandas as pd
 import json
 import os
-import glob
 import requests
 import uuid
 
@@ -36,11 +35,11 @@ def logout_user():
         del st.query_params["user"]
 
 # ==========================================
-# BÚSQUEDA DINÁMICA DE IMÁGENES EN SUBCARPETAS
+# BÚSQUEDA Y ESCANEO DINÁMICO DE IMÁGENES
 # ==========================================
 def find_leader_image(deck_name):
     """
-    Busca recursivamente la imagen del mazo/líder dentro de 'images/' 
+    Busca recursivamente la imagen del mazo/líder dentro de 'images/'
     y todas sus subcarpetas (ej. images/lider/op11/Nami.png).
     """
     if not deck_name or deck_name == "Sin mazo asignado":
@@ -50,14 +49,12 @@ def find_leader_image(deck_name):
     if not os.path.exists(base_dir):
         return None
 
-    # Formatos y nombres posibles a buscar
     clean_name = deck_name.strip()
     possible_filenames = [
         f"{clean_name}.png", f"{clean_name}.jpg", f"{clean_name}.jpeg", f"{clean_name}.webp",
         f"{clean_name.lower()}.png", f"{clean_name.lower()}.jpg"
     ]
 
-    # Si viene con formato OP17-Shanks, también intentar buscar solo "Shanks"
     if "-" in clean_name:
         parts = clean_name.split("-", 1)
         sub_name = parts[1].strip()
@@ -66,7 +63,6 @@ def find_leader_image(deck_name):
             f"{sub_name.lower()}.png", f"{sub_name.lower()}.jpg"
         ])
 
-    # Escanear recursivamente la carpeta images y sus subdirectorios
     for root, _, files in os.walk(base_dir):
         for file in files:
             for target in possible_filenames:
@@ -74,6 +70,30 @@ def find_leader_image(deck_name):
                     return os.path.join(root, file)
 
     return None
+
+def get_expansions_and_leaders(base_path="images/lider"):
+    """
+    Escanea la carpeta de imágenes y devuelve un diccionario con las expansiones
+    y los líderes encontrados dentro de cada una.
+    Ejemplo: {'OP11': ['Nami', 'Zoro'], 'OP17': ['Shanks']}
+    """
+    expansions = {}
+    if not os.path.exists(base_path):
+        return expansions
+
+    for entry in sorted(os.listdir(base_path)):
+        full_p = os.path.join(base_path, entry)
+        if os.path.isdir(full_p):
+            exp_name = entry.upper()
+            leaders = []
+            for f in sorted(os.listdir(full_p)):
+                if f.lower().endswith(('.png', '.jpg', '.jpeg', '.webp')):
+                    leader_name = os.path.splitext(f)[0]
+                    leaders.append(leader_name)
+            if leaders:
+                expansions[exp_name] = leaders
+
+    return expansions
 
 # ==========================================
 # LECTURA / ESCRITURA MEDIANTE WEBAPP
@@ -564,7 +584,7 @@ with tab_elements[2]:
         st.info("No hay torneos pasados registrados.")
 
 # ------------------------------------------
-# TAB 4: MI PERFIL (CON BÚSQUEDA DE IMAGEN RECURSIVA)
+# TAB 4: MI PERFIL (CON DESPLEGABLES POR EXPANSIÓN)
 # ------------------------------------------
 if is_logged:
     current_tab_idx = 3
@@ -580,24 +600,50 @@ if is_logged:
             new_name = st.text_input("Nombre Visible / Nick:", value=user_data.get("name", ""))
             new_email = st.text_input("Correo Electrónico registrado:", value=user_data.get("email", ""))
             
-            options_deck = ["Sin mazo asignado"] + deck_names_list
+            st.write("---")
+            st.write("### 🎴 Selección de Mazo / Líder")
+            
+            exp_data = get_expansions_and_leaders("images/lider")
             curr_deck_val = user_data.get("deck", "Sin mazo asignado")
-            idx_deck = options_deck.index(curr_deck_val) if curr_deck_val in options_deck else 0
             
-            selected_deck = st.selectbox("Mazo / Líder Habitual:", options=options_deck, index=idx_deck)
-            
+            if not exp_data:
+                # Fallback al selector simple si no existen las subcarpetas images/lider/
+                options_deck = ["Sin mazo asignado"] + deck_names_list
+                idx_deck = options_deck.index(curr_deck_val) if curr_deck_val in options_deck else 0
+                selected_deck = st.selectbox("Mazo / Líder Habitual:", options=options_deck, index=idx_deck)
+            else:
+                exp_options = ["Sin mazo asignado"] + list(exp_data.keys())
+                
+                default_exp_idx = 0
+                for exp, leaders in exp_data.items():
+                    if curr_deck_val in leaders or curr_deck_val.startswith(exp):
+                        default_exp_idx = exp_options.index(exp)
+                        break
+
+                selected_exp = st.selectbox("1. Selecciona Expansión:", options=exp_options, index=default_exp_idx)
+                
+                if selected_exp != "Sin mazo asignado":
+                    leaders_in_exp = exp_data.get(selected_exp, [])
+                    
+                    default_leader_idx = 0
+                    if curr_deck_val in leaders_in_exp:
+                        default_leader_idx = leaders_in_exp.index(curr_deck_val)
+                        
+                    selected_leader = st.selectbox("2. Selecciona Líder:", options=leaders_in_exp, index=default_leader_idx)
+                    selected_deck = selected_leader
+                else:
+                    selected_deck = "Sin mazo asignado"
+
             st.write("---")
             if selected_deck != "Sin mazo asignado":
                 col_img, col_desc = st.columns([1, 2])
-                
-                # BÚSQUEDA AUTOMÁTICA EN EN SUBCARPETAS (Ej: images/lider/op11/Nami.png)
                 img_found_path = find_leader_image(selected_deck)
                 
                 with col_img:
                     if img_found_path:
                         st.image(img_found_path, caption=selected_deck, use_column_width=True)
                     else:
-                        st.caption(f"ℹ️ (Agrega la imagen de '{selected_deck}' dentro de /images o sus subcarpetas)")
+                        st.caption(f"ℹ️ (Imagen no encontrada para '{selected_deck}')")
                 with col_desc:
                     st.write("**Descripción del Líder:**")
                     st.info(available_decks.get(selected_deck, "Sin descripción registrada."))
