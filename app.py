@@ -4,6 +4,7 @@ import json
 import os
 import requests
 import uuid
+import re
 
 # ==========================================
 # GESTIÓN DE SESIÓN PERSISTENTE (URL QUERY PARAMS)
@@ -21,9 +22,9 @@ st.set_page_config(
     initial_sidebar_state=sidebar_state
 )
 
-ADMIN_USER = st.secrets.get("ADMIN_USER", "zeloth")
-ADMIN_PASS = st.secrets.get("ADMIN_PASS", "admin123")
-WEBAPP_URL = st.secrets.get("WEBAPP_URL", "")
+ADMIN_USER = st.secrets.get("ADMIN_USER")
+ADMIN_PASS = st.secrets.get("ADMIN_PASS")
+WEBAPP_URL = st.secrets.get("WEBAPP_URL")
 
 def login_user(username):
     st.session_state.logged_user = username
@@ -35,56 +36,84 @@ def logout_user():
         del st.query_params["user"]
 
 # ==========================================
-# BÚSQUEDA Y ESCANEO DINÁMICO DE IMÁGENES
+# BÚSQUEDA Y GESTIÓN DE CARTAS / LÍDERES
 # ==========================================
-def find_leader_image(deck_name):
-    if not deck_name or deck_name == "Sin mazo asignado":
+def find_card_image(card_code):
+    """
+    Busca la imagen de una carta en la nueva estructura images/Cards/<EXP>/<CODIGO>.png
+    Ej: images/Cards/OP05/OP05-002.png
+    """
+    if not card_code:
         return None
+    
+    clean_code = card_code.strip().upper()
+    # Extraer expansión (ej. OP05 de OP05-002)
+    match = re.match(r"^([A-Z0-9]+)-", clean_code)
+    if match:
+        expansion = match.group(1)
+        path = os.path.join("images", "Cards", expansion, f"{clean_code}.png")
+        if os.path.exists(path):
+            return path
+        # Intentar minúsculas o extensiones alternativas
+        path_jpg = os.path.join("images", "Cards", expansion, f"{clean_code}.jpg")
+        if os.path.exists(path_jpg):
+            return path_jpg
 
-    base_dir = "images"
-    if not os.path.exists(base_dir):
-        return None
-
-    clean_name = deck_name.strip()
-    possible_filenames = [
-        f"{clean_name}.png", f"{clean_name}.jpg", f"{clean_name}.jpeg", f"{clean_name}.webp",
-        f"{clean_name.lower()}.png", f"{clean_name.lower()}.jpg"
-    ]
-
-    if "-" in clean_name:
-        parts = clean_name.split("-", 1)
-        sub_name = parts[1].strip()
-        possible_filenames.extend([
-            f"{sub_name}.png", f"{sub_name}.jpg",
-            f"{sub_name.lower()}.png", f"{sub_name.lower()}.jpg"
-        ])
-
-    for root, _, files in os.walk(base_dir):
-        for file in files:
-            for target in possible_filenames:
-                if file.lower() == target.lower():
+    # Búsqueda recursiva genérica por si acaso
+    base_dir = "images/Cards"
+    if os.path.exists(base_dir):
+        for root, _, files in os.walk(base_dir):
+            for file in files:
+                if file.upper().startswith(clean_code):
                     return os.path.join(root, file)
+                    
+    # Fallback al sistema antiguo de imágenes si estuviera
+    legacy_path = os.path.join("images", f"{clean_code}.png")
+    if os.path.exists(legacy_path):
+        return legacy_path
 
     return None
 
-def get_expansions_and_leaders(base_path="images/lider"):
-    expansions = {}
-    if not os.path.exists(base_path):
-        return expansions
+def parse_decklist(decklist_text):
+    """
+    Parsea el texto de la lista de cartas.
+    Formato esperado por línea: 4xOP05-015 o 1 x OP05-002
+    Retorna: (total_cards, parsed_items_dict, leader_code, error_message)
+    """
+    if not decklist_text:
+        return 0, {}, None, "La lista está vacía."
 
-    for entry in sorted(os.listdir(base_path)):
-        full_p = os.path.join(base_path, entry)
-        if os.path.isdir(full_p):
-            exp_name = entry.upper()
-            leaders = []
-            for f in sorted(os.listdir(full_p)):
-                if f.lower().endswith(('.png', '.jpg', '.jpeg', '.webp')):
-                    leader_name = os.path.splitext(f)[0]
-                    leaders.append(leader_name)
-            if leaders:
-                expansions[exp_name] = leaders
+    lines = decklist_text.strip().split("\n")
+    total_count = 0
+    parsed_items = {}
+    leader_code = None
+    
+    pattern = re.compile(r"^\s*(\d+)\s*[xX]\s*([A-Z0-9]+-[A-Z0-9]+)\s*$", re.IGNORECASE)
 
-    return expansions
+    for line_num, line in enumerate(lines, 1):
+        line = line.strip()
+        if not line:
+            continue
+        
+        match = pattern.match(line)
+        if not match:
+            return 0, {}, None, f"Error en la línea {line_num}: '{line}'. Formato requerido: `4xOP05-015`"
+        
+        qty = int(match.group(1))
+        code = match.group(2).upper()
+        
+        total_count += qty
+        parsed_items[code] = parsed_items.get(code, 0) + qty
+        
+        # En OPTCG, los líderes suelen ser cantidad 1 y terminan en -001 (o identificados por convención)
+        # O permitimos que la carta de cantidad 1 sea detectada como líder potencial
+        if qty == 1 and (code.endswith("-001") or not leader_code):
+            leader_code = code
+
+    if total_count != 51:
+        return 0, {}, None, f"La cantidad total de cartas debe ser exactamente 51. Actualmente hay {total_count} cartas."
+
+    return total_count, parsed_items, leader_code, None
 
 # ==========================================
 # LECTURA / ESCRITURA MEDIANTE WEBAPP
@@ -98,16 +127,13 @@ def load_db():
             "password": ADMIN_PASS,
             "name": "[SCC]zeloth",
             "role": "admin",
-            "deck": "Sin mazo asignado",
+            "decklist": "1xOP05-001\n50xOP05-002",
             "email": "admin@domain.com",
             "reset_requested": False
         }
     }
     
-    default_decks = {
-        "OP17-Shanks": "Líder agresivo de los Piratas del Pelirrojo.",
-        "OP01-001 Zoro": "Líder Rojo agresivo con gran presión ofensiva."
-    }
+    default_decks = {}
 
     try:
         df_all = pd.DataFrame()
@@ -122,18 +148,23 @@ def load_db():
         if df_all.empty:
             return {"users": default_users, "tournaments": default_tourneys, "past_tournaments": default_past_tourneys, "decks": default_decks}
 
-        # 1. Cargar Usuarios
         users_dict = {}
         if 'username' in df_all.columns:
             for _, row in df_all.iterrows():
                 u_val = row.get('username')
                 if pd.notna(u_val) and str(u_val).strip() != "":
                     u_name = str(u_val).strip()
+                    # Compatibilidad con la columna deck anterior transformándola a decklist si es necesario
+                    legacy_deck = str(row.get('deck', '')).strip()
+                    decklist_val = str(row.get('decklist', '')).strip()
+                    if not decklist_val and legacy_deck and "-" in legacy_deck:
+                        decklist_val = f"1x{legacy_deck}\n50xOP01-002"
+
                     users_dict[u_name] = {
                         "password": str(row.get('password', '')) if pd.notna(row.get('password')) else "",
                         "name": str(row.get('name', u_name)) if pd.notna(row.get('name')) else u_name,
                         "role": str(row.get('role', 'player')).strip().lower() if pd.notna(row.get('role')) else "player",
-                        "deck": str(row.get('deck', 'Sin mazo asignado')).strip() if pd.notna(row.get('deck')) else "Sin mazo asignado",
+                        "decklist": decklist_val,
                         "email": str(row.get('email', '')).strip() if pd.notna(row.get('email')) else "",
                         "reset_requested": str(row.get('reset_requested', 'false')).lower() == 'true'
                     }
@@ -141,7 +172,6 @@ def load_db():
         if ADMIN_USER not in users_dict:
             users_dict[ADMIN_USER] = default_users[ADMIN_USER]
 
-        # 2. Cargar Torneos Activos e Historial
         tourneys_dict = {}
         past_tourneys_list = []
         if 'key' in df_all.columns and 'value' in df_all.columns:
@@ -150,24 +180,9 @@ def load_db():
                 val = t_row['value'].values[0]
                 if pd.notna(val) and str(val).strip() != "":
                     try:
-                        parsed_val = json.loads(val)
-                        if isinstance(parsed_val, dict):
-                            tourneys_dict = parsed_val
+                        tourneys_dict = json.loads(val)
                     except Exception:
                         pass
-            else:
-                legacy_row = df_all.loc[df_all['key'].astype(str).str.strip().str.lower() == 'data']
-                if not legacy_row.empty:
-                    val = legacy_row['value'].values[0]
-                    if pd.notna(val) and str(val).strip() != "":
-                        try:
-                            legacy_data = json.loads(val)
-                            if isinstance(legacy_data, dict) and legacy_data.get("name"):
-                                t_id = "t_legacy"
-                                past_tourneys_list = legacy_data.pop("past_tournaments", [])
-                                tourneys_dict[t_id] = legacy_data
-                        except Exception:
-                            pass
 
             past_row = df_all.loc[df_all['key'].astype(str).str.strip().str.lower() == 'past_tournaments']
             if not past_row.empty:
@@ -178,21 +193,7 @@ def load_db():
                     except Exception:
                         pass
 
-        # 3. Cargar Mazos
-        decks_dict = {}
-        if 'deck_name' in df_all.columns:
-            for _, row in df_all.iterrows():
-                d_name_val = row.get('deck_name')
-                if pd.notna(d_name_val) and str(d_name_val).strip() != "":
-                    d_name = str(d_name_val).strip()
-                    if d_name.lower() != 'deck_name':
-                        d_desc = str(row.get('deck_description', 'Sin descripción.')).strip()
-                        decks_dict[d_name] = d_desc if d_desc else "Sin descripción."
-
-        if not decks_dict:
-            decks_dict = default_decks
-
-        return {"users": users_dict, "tournaments": tourneys_dict, "past_tournaments": past_tourneys_list, "decks": decks_dict}
+        return {"users": users_dict, "tournaments": tourneys_dict, "past_tournaments": past_tourneys_list, "decks": default_decks}
 
     except Exception:
         return {
@@ -208,12 +209,11 @@ def save_db(data):
         return
 
     try:
-        headers = ["username", "password", "name", "role", "deck", "reset_requested", "email", "", "", "", "key", "value", "", "", "", "deck_name", "deck_description"]
+        headers = ["username", "password", "name", "role", "decklist", "reset_requested", "email", "", "", "", "key", "value", "", "", "", "", ""]
         
         users_rows = [headers]
-        deck_items = list(data["decks"].items())
         u_keys = list(data["users"].keys())
-        max_len = max(len(u_keys), 2, len(deck_items))
+        max_len = max(len(u_keys), 2)
         
         for i in range(max_len):
             row = [""] * 17
@@ -225,7 +225,7 @@ def save_db(data):
                 row[1] = str(u_data.get("password", ""))
                 row[2] = str(u_data.get("name", ""))
                 row[3] = str(u_data.get("role", "player"))
-                row[4] = str(u_data.get("deck", "Sin mazo asignado"))
+                row[4] = str(u_data.get("decklist", ""))
                 row[5] = "TRUE" if u_data.get("reset_requested") else "FALSE"
                 row[6] = str(u_data.get("email", ""))
 
@@ -235,10 +235,6 @@ def save_db(data):
             elif i == 1:
                 row[10] = "past_tournaments"
                 row[11] = json.dumps(data.get("past_tournaments", []))
-
-            if i < len(deck_items):
-                row[15] = str(deck_items[i][0])
-                row[16] = str(deck_items[i][1])
 
             users_rows.append(row)
 
@@ -259,29 +255,26 @@ db = {
     "past_tournaments": db_full["past_tournaments"]
 }
 available_decks = db_full["decks"]
-deck_names_list = list(available_decks.keys())
 
 # ==========================================
 # AUXILIARES Y LÓGICA DE TORNEO
 # ==========================================
 def finish_tournament_logic(t_id, db_data, explicit_winner_user=None):
-    """
-    Cierra un torneo, calcula al ganador y lo traslada al historial de torneos pasados.
-    """
     t_curr = db_data["tournaments"][t_id]
     t_curr["status"] = "finished"
     
     sorted_p = sorted(t_curr["players"].items(), key=lambda x: x[1]["points"], reverse=True)
     winner_user = explicit_winner_user or (sorted_p[0][0] if sorted_p else "N/A")
     winner_name = db_data["users"].get(winner_user, {}).get("name", winner_user)
-    winner_deck = t_curr["players"].get(winner_user, {}).get("deck", "N/A")
+    winner_decklist = t_curr["players"].get(winner_user, {}).get("decklist", "")
+    _, _, winner_leader, _ = parse_decklist(winner_decklist)
     
     db_data.setdefault("past_tournaments", []).append({
         "name": t_curr["name"],
         "total_rounds": t_curr["round"],
         "winner_user": winner_user,
         "winner_name": winner_name,
-        "winner_deck": winner_deck,
+        "winner_leader": winner_leader or "Desconocido",
         "standings": t_curr["players"]
     })
     
@@ -337,9 +330,6 @@ def generate_swiss_pairings_for_tournament(t_id, db_data):
     })
 
 def render_standings_table(t_players_data, users_db):
-    """
-    Renderiza la tabla de posiciones (Standings) formateada.
-    """
     if not t_players_data:
         st.caption("Sin datos de posiciones disponibles.")
         return
@@ -347,9 +337,11 @@ def render_standings_table(t_players_data, users_db):
     standings_rows = []
     for username, pdata in t_players_data.items():
         u_info = users_db.get(username, {})
+        decklist = pdata.get("decklist", "")
+        _, _, leader, _ = parse_decklist(decklist)
         standings_rows.append({
             "Jugador": u_info.get("name", username),
-            "Mazo": pdata.get("deck", "Sin mazo asignado"),
+            "Líder": leader or "N/A",
             "Puntos": pdata.get("points", 0),
             "Estado": "DROPPED" if pdata.get("dropped") else "Activo"
         })
@@ -395,7 +387,7 @@ if st.session_state.logged_user is None or st.session_state.logged_user not in d
                         "password": password,
                         "name": user_name,
                         "role": "player",
-                        "deck": "Sin mazo asignado",
+                        "decklist": "1xOP01-001\n50xOP01-002",
                         "email": user_email.strip(),
                         "reset_requested": False
                     }
@@ -452,7 +444,7 @@ if can_manage_tournaments:
 tab_elements = st.tabs(tabs)
 
 # ------------------------------------------
-# TAB 1: TORNEOS MULTIPLES (PAREOS + STANDINGS BAJO PAREOS)
+# TAB 1: TORNEOS MULTIPLES
 # ------------------------------------------
 with tab_elements[0]:
     st.subheader("🎯 Torneos Activos y Próximos Eventos")
@@ -467,25 +459,29 @@ with tab_elements[0]:
         t_info = tournaments[selected_t_id]
         st.write("---")
         
-        # ESTADO 1: No iniciado (Inscripciones abiertas)
         if t_info.get("status") == "not_started":
             st.success(f"🏆 **Torneo Anunciado:** {t_info['name']}")
-            st.info("Las inscripciones están **abiertas**. Inscríbete a continuación con tu mazo asignado.")
+            st.info("Las inscripciones están **abiertas**. Asegúrate de tener tu decklist de 51 cartas guardada en tu perfil antes de inscribirte.")
             
             if is_logged:
                 curr_u = st.session_state.logged_user
                 in_registered = curr_u in t_info.get("players", {})
-                current_deck = db["users"][curr_u].get("deck", "Sin mazo asignado")
+                user_decklist = db["users"][curr_u].get("decklist", "")
+                
+                total_c, _, leader_c, err_msg = parse_decklist(user_decklist)
                 
                 st.write("#### Tu Estado en este Torneo")
-                st.write(f"Jugador: **{db['users'][curr_u]['name']}** | Mazo a registrar: **{current_deck}**")
+                st.write(f"Jugador: **{db['users'][curr_u]['name']}** | Líder detectado: **{leader_c or 'Ninguno'}**")
+                
+                if err_msg:
+                    st.warning(f"⚠️ Tu decklist actual tiene un problema: {err_msg}. Actualiza tu decklist en la pestaña 'Mi Perfil' para poder inscribirte.")
                 
                 col_ins1, col_ins2 = st.columns(2)
                 with col_ins1:
                     if not in_registered:
-                        if st.button("Inscribirme a este Torneo", type="primary", key=f"ins_{selected_t_id}"):
+                        if st.button("Inscribirme a este Torneo", type="primary", key=f"ins_{selected_t_id}", disabled=(err_msg is not None)):
                             t_info.setdefault("players", {})[curr_u] = {
-                                "points": 0, "dropped": False, "deck": current_deck, "history": []
+                                "points": 0, "dropped": False, "decklist": user_decklist, "history": []
                             }
                             save_db({"users": db["users"], "tournaments": db["tournaments"], "past_tournaments": db["past_tournaments"], "decks": available_decks})
                             st.success("¡Te has inscrito correctamente!")
@@ -506,12 +502,12 @@ with tab_elements[0]:
                 registered_list = []
                 for p_id, p_data in t_info["players"].items():
                     p_name = db["users"].get(p_id, {}).get("name", p_id)
-                    registered_list.append({"Jugador": p_name, "Mazo": p_data.get("deck", "Sin mazo")})
+                    _, _, p_lead, _ = parse_decklist(p_data.get("decklist", ""))
+                    registered_list.append({"Jugador": p_name, "Líder": p_lead or "N/A"})
                 st.dataframe(pd.DataFrame(registered_list), use_container_width=True)
             else:
                 st.caption("Aún no hay jugadores inscritos.")
 
-        # ESTADO 2: Torneo Activo en curso
         elif t_info.get("status") in ["active", "finished"]:
             st.write(f"### ⚔️ {t_info['name']} (Ronda {t_info.get('round', 0)})")
             
@@ -532,13 +528,31 @@ with tab_elements[0]:
 
                     p2_name = db["users"].get(match["p2"], {}).get("name", match["p2"])
                     
-                    with st.expander(f"Mesa {idx+1}: {p1_name} vs {p2_name} | Estado: {match['result'] or 'Pendiente'}"):
-                        p1_deck = t_info["players"].get(match["p1"], {}).get("deck", "N/A")
-                        p2_deck = t_info["players"].get(match["p2"], {}).get("deck", "N/A")
-                        st.write(f"**{p1_name}** ({p1_deck}) vs **{p2_name}** ({p2_deck})")
+                    p1_dl = t_info["players"].get(match["p1"], {}).get("decklist", "")
+                    p2_dl = t_info["players"].get(match["p2"], {}).get("decklist", "")
+                    _, _, p1_lead, _ = parse_decklist(p1_dl)
+                    _, _, p2_lead, _ = parse_decklist(p2_dl)
+
+                    with st.expander(f"Mesa {idx+1}: {p1_name} ({p1_lead}) vs {p2_name} ({p2_lead}) | Estado: {match['result'] or 'Pendiente'}"):
+                        c_img1, c_img2 = st.columns(2)
+                        with c_img1:
+                            st.write(f"**{p1_name}** (Líder: {p1_lead})")
+                            p1_img = find_card_image(p1_lead)
+                            if p1_img:
+                                st.image(p1_img, width=150)
+                            with st.expander("Ver Decklist completo"):
+                                st.text(p1_dl)
+                        with c_img2:
+                            st.write(f"**{p2_name}** (Líder: {p2_lead})")
+                            p2_img = find_card_image(p2_lead)
+                            if p2_img:
+                                st.image(p2_img, width=150)
+                            with st.expander("Ver Decklist completo"):
+                                st.text(p2_dl)
 
                         user = st.session_state.logged_user
                         if match["result"] is None and (user in [match["p1"], match["p2"]] or can_manage_tournaments):
+                            st.write("---")
                             c1, c2 = st.columns(2)
                             winner = c1.selectbox("Ganador:", [p1_name, p2_name, "Empate"], key=f"win_{selected_t_id}_{t_info['round']}_{idx}")
                             first_player = c2.selectbox("¿Quién inició primero?:", [p1_name, p2_name], key=f"first_{selected_t_id}_{t_info['round']}_{idx}")
@@ -561,13 +575,12 @@ with tab_elements[0]:
                                 save_db({"users": db["users"], "tournaments": db["tournaments"], "past_tournaments": db["past_tournaments"], "decks": available_decks})
                                 st.rerun()
 
-            # TABLA DE POSICIONES MOSTRADA JUSTO DEBAJO DE LOS PAREOS DE ESTE TORNEO
             st.write("---")
             st.write("#### 📊 Tabla de Posiciones en Tiempo Real (Standings)")
             render_standings_table(t_info.get("players", {}), db["users"])
 
 # ------------------------------------------
-# TAB 2: HISTORIAL
+# TAB 2: HISTORIAL CON GRÁFICO DE TORTA
 # ------------------------------------------
 with tab_elements[1]:
     st.subheader("📜 Historial de Torneos Finalizados")
@@ -575,24 +588,53 @@ with tab_elements[1]:
     if past_list:
         for past in reversed(past_list):
             w_name = past.get("winner_name", "N/A")
-            w_deck = past.get("winner_deck", "N/A")
+            w_leader = past.get("winner_leader", "N/A")
             
-            with st.expander(f"🏆 {past['name']} — Ganador: {w_name} ({w_deck})"):
-                st.success(f"👑 **Campeón del Torneo:** {w_name} | **Mazo / Líder:** {w_deck}")
-                st.write(f"**Rondas Totales:** {past.get('total_rounds', 'N/A')}")
+            with st.expander(f"🏆 {past['name']} — Ganador: {w_name} ({w_leader})"):
+                col_h1, col_h2 = st.columns([1, 2])
+                with col_h1:
+                    st.success(f"👑 **Campeón:** {w_name}")
+                    st.write(f"🎴 **Líder Ganador:** {w_leader}")
+                    w_img = find_card_image(w_leader)
+                    if w_img:
+                        st.image(w_img, width=160)
+                with col_h2:
+                    st.write(f"**Rondas Totales:** {past.get('total_rounds', 'N/A')}")
+                    st.write("#### 📊 Standings Finales:")
+                    render_standings_table(past.get("standings", {}), db["users"])
+
                 st.write("---")
-                st.write("#### 📊 Standings Finales del Torneo:")
-                render_standings_table(past.get("standings", {}), db["users"])
+                st.write("### 📈 Distribución de Líderes Jugados en el Torneo")
+                standings_data = past.get("standings", {})
+                if standings_data:
+                    leader_counts = {}
+                    for _, pdata in standings_data.items():
+                        _, _, lead, _ = parse_decklist(pdata.get("decklist", ""))
+                        if lead:
+                            leader_counts[lead] = leader_counts.get(lead, 0) + 1
+                    
+                    if leader_counts:
+                        df_chart = pd.DataFrame(list(leader_counts.items()), columns=["Líder", "Cantidad"])
+                        # Gráfico de torta nativo con st.altair_chart o st.bar_chart / st.pyplot
+                        import altair as alt
+                        pie_chart = alt.Chart(df_chart).mark_arc(innerRadius=50).encode(
+                            theta=alt.Theta(field="Cantidad", type="quantitative"),
+                            color=alt.Color(field="Líder", type="nominal"),
+                            tooltip=["Líder", "Cantidad"]
+                        ).properties(width=400, height=300)
+                        st.altair_chart(pie_chart, use_container_width=True)
+                    else:
+                        st.caption("No hay datos suficientes de líderes para graficar.")
     else:
         st.info("No hay torneos pasados registrados en el historial.")
 
 # ------------------------------------------
-# TAB 3: MI PERFIL (CON BÚSQUEDA DE IMAGEN RECURSIVA)
+# TAB 3: MI PERFIL (GESTIÓN DE DECKLIST)
 # ------------------------------------------
 if is_logged:
     current_tab_idx = 2
     with tab_elements[current_tab_idx]:
-        st.subheader("👤 MI PERFIL")
+        st.subheader("👤 MI PERFIL - Decklist del Jugador")
         curr_username = st.session_state.logged_user
         user_data = db["users"][curr_username]
         
@@ -604,64 +646,44 @@ if is_logged:
             new_email = st.text_input("Correo Electrónico registrado:", value=user_data.get("email", ""))
             
             st.write("---")
-            st.write("### 🎴 Selección de Mazo / Líder")
+            st.write("### 🎴 Tu Decklist de 51 Cartas")
+            st.caption("Ingresa tu lista con el formato `Cantidad x Código` (ej. `1xOP05-001`, `4xOP05-015`). La suma exacta debe ser 51 cartas.")
             
-            exp_data = get_expansions_and_leaders("images/lider")
-            curr_deck_val = user_data.get("deck", "Sin mazo asignado")
+            current_decklist = user_data.get("decklist", "")
+            new_decklist = st.text_area("Decklist:", value=current_decklist, height=220)
             
-            if not exp_data:
-                options_deck = ["Sin mazo asignado"] + deck_names_list
-                idx_deck = options_deck.index(curr_deck_val) if curr_deck_val in options_deck else 0
-                selected_deck = st.selectbox("Mazo / Líder Habitual:", options=options_deck, index=idx_deck)
+            total_cards, parsed_dict, detected_leader, validation_error = parse_decklist(new_decklist)
+            
+            if validation_error:
+                st.error(f"❌ {validation_error}")
             else:
-                exp_options = ["Sin mazo asignado"] + list(exp_data.keys())
+                st.success(f"✅ ¡Decklist válida! Total de cartas: {total_cards} | Líder detectado: **{detected_leader}**")
                 
-                default_exp_idx = 0
-                for exp, leaders in exp_data.items():
-                    if curr_deck_val in leaders or curr_deck_val.startswith(exp):
-                        default_exp_idx = exp_options.index(exp)
-                        break
-
-                selected_exp = st.selectbox("1. Selecciona Expansión:", options=exp_options, index=default_exp_idx)
-                
-                if selected_exp != "Sin mazo asignado":
-                    leaders_in_exp = exp_data.get(selected_exp, [])
-                    
-                    default_leader_idx = 0
-                    if curr_deck_val in leaders_in_exp:
-                        default_leader_idx = leaders_in_exp.index(curr_deck_val)
-                        
-                    selected_leader = st.selectbox("2. Selecciona Líder:", options=leaders_in_exp, index=default_leader_idx)
-                    selected_deck = selected_leader
+            st.write("---")
+            if st.button("Guardar Mi Perfil y Decklist"):
+                if validation_error:
+                    st.error("No se puede guardar porque la decklist no es válida (debe sumar exactamente 51 cartas).")
                 else:
-                    selected_deck = "Sin mazo asignado"
-
-            st.write("---")
-            if selected_deck != "Sin mazo asignado":
-                col_img, col_desc = st.columns([1, 2])
-                img_found_path = find_leader_image(selected_deck)
-                
-                with col_img:
-                    if img_found_path:
-                        st.image(img_found_path, caption=selected_deck, use_column_width=True)
-                    else:
-                        st.caption(f"ℹ️ (Imagen no encontrada para '{selected_deck}')")
-                with col_desc:
-                    st.write("**Descripción del Líder:**")
-                    st.info(available_decks.get(selected_deck, "Sin descripción registrada."))
-            else:
-                st.info("Actualmente estás marcado como 'Sin mazo asignado'.")
-
-            st.write("---")
-            if st.button("Guardar Cambios de Perfil"):
-                db["users"][curr_username]["name"] = new_name.strip()
-                db["users"][curr_username]["email"] = new_email.strip()
-                db["users"][curr_username]["deck"] = selected_deck
-                save_db({"users": db["users"], "tournaments": db["tournaments"], "past_tournaments": db["past_tournaments"], "decks": available_decks})
-                st.success("Perfil actualizado correctamente.")
-                st.rerun()
+                    db["users"][curr_username]["name"] = new_name.strip()
+                    db["users"][curr_username]["email"] = new_email.strip()
+                    db["users"][curr_username]["decklist"] = new_decklist.strip()
+                    save_db({"users": db["users"], "tournaments": db["tournaments"], "past_tournaments": db["past_tournaments"], "decks": available_decks})
+                    st.success("Perfil y Decklist actualizados correctamente.")
+                    st.rerun()
 
         with col_prof2:
+            st.write("### 🔍 Vista Previa del Líder Detectado")
+            _, _, leader_code, _ = parse_decklist(new_decklist)
+            if leader_code:
+                l_img = find_card_image(leader_code)
+                if l_img:
+                    st.image(l_img, caption=f"Líder: {leader_code}", width=220)
+                else:
+                    st.warning(f"No se encontró la imagen para el código `{leader_code}` en `images/Cards/`.")
+            else:
+                st.info("Ingresa una decklist válida para visualizar tu líder.")
+
+            st.write("---")
             st.write("### 🔒 Cambiar Contraseña")
             curr_pass_input = st.text_input("Contraseña Actual:", type="password")
             new_pass_input = st.text_input("Nueva Contraseña:", type="password")
@@ -669,7 +691,7 @@ if is_logged:
             
             if st.button("Actualizar Contraseña"):
                 if curr_pass_input != user_data["password"]:
-                    st.error("La contraseña actual is incorrecta.")
+                    st.error("La contraseña actual es incorrecta.")
                 elif new_pass_input and new_pass_input == confirm_pass_input:
                     db["users"][curr_username]["password"] = new_pass_input
                     db["users"][curr_username]["reset_requested"] = False
@@ -689,12 +711,13 @@ if is_admin:
         
         users_list = []
         for u_id, u_data in db["users"].items():
+            _, _, l_code, _ = parse_decklist(u_data.get("decklist", ""))
             users_list.append({
                 "Usuario": u_id,
                 "Nombre": u_data.get("name", ""),
                 "Correo": u_data.get("email", ""),
                 "Rol": u_data.get("role", "player").upper(),
-                "Mazo": u_data.get("deck", "Sin mazo asignado"),
+                "Líder Registrado": l_code or "Sin líder",
                 "Reset Solicitado": "SÍ" if u_data.get("reset_requested") else "No"
             })
         st.dataframe(pd.DataFrame(users_list), use_container_width=True)
@@ -730,7 +753,6 @@ if can_manage_tournaments:
     with tab_elements[t_tab_idx]:
         st.subheader("⚙️ Panel de Control de Torneos (Admin & Moderadores)")
         
-        # 1. Crear Nuevo Torneo
         st.write("### 🆕 Anunciar Nuevo Torneo")
         with st.form("create_tournament_form"):
             new_t_name = st.text_input("Nombre del Nuevo Torneo:", placeholder="Ej. Liga Mensual de Octubre")
@@ -793,7 +815,6 @@ if can_manage_tournaments:
                 else:
                     st.success("Todas las partidas de la ronda actual han sido completadas.")
                     
-                    # EVALUACIÓN DE GANADOR ÚNICO (SISTEMA SUIZO CERRADO)
                     active_players_list = [p for p in t_curr["players"].items() if not p[1].get("dropped")]
                     active_players_list.sort(key=lambda x: x[1]["points"], reverse=True)
                     
@@ -802,7 +823,6 @@ if can_manage_tournaments:
                     
                     if len(active_players_list) >= 1:
                         top_points = active_players_list[0][1]["points"]
-                        # Verificar si el segundo lugar (si existe) tiene estrictamente menos puntos
                         if len(active_players_list) == 1 or active_players_list[1][1]["points"] < top_points:
                             has_single_winner = True
                             single_winner_user = active_players_list[0][0]
@@ -810,8 +830,7 @@ if can_manage_tournaments:
                     if has_single_winner:
                         winner_display_name = db["users"].get(single_winner_user, {}).get("name", single_winner_user)
                         st.balloons()
-                        st.success(f"🏆 **¡Tenemos un único Ganador Absoluto!** {winner_display_name} lidera la tabla de posiciones en solitario con {top_points} pts.")
-                        st.info("El torneo debe finalizarse ahora ya que el ganador ha sido determinado de forma definitiva.")
+                        st.success(f"🏆 **¡Tenemos un único Ganador Absoluto!** {winner_display_name} lidera la tabla en solitario con {top_points} pts.")
                         
                         if st.button("🏆 Finalizar y Proclamar Ganador", type="primary", key=f"auto_finish_{adm_selected_t_id}"):
                             finish_tournament_logic(adm_selected_t_id, db, explicit_winner_user=single_winner_user)
@@ -833,7 +852,8 @@ if can_manage_tournaments:
                 registered_list = []
                 for p_id, p_data in t_curr["players"].items():
                     p_name = db["users"].get(p_id, {}).get("name", p_id)
-                    registered_list.append({"Usuario": p_id, "Nombre": p_name, "Mazo": p_data.get("deck", "Sin mazo"), "Puntos": p_data.get("points", 0)})
+                    _, _, p_lead, _ = parse_decklist(p_data.get("decklist", ""))
+                    registered_list.append({"Usuario": p_id, "Nombre": p_name, "Líder": p_lead or "N/A", "Puntos": p_data.get("points", 0)})
                 st.dataframe(pd.DataFrame(registered_list), use_container_width=True)
             else:
                 st.caption("Aún no hay ningún jugador inscrito.")
